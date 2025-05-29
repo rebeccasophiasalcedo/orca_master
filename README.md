@@ -1,2 +1,2 @@
 # orcaRSG
-code supporting bioinformatic analysis in Paris et al., 2025 (Journal)
+code supporting bioinformatic analysis for combination of JGI, nanopore, and RSG sequencing from the 2023 Orca Basin Expedition by the OAST team
