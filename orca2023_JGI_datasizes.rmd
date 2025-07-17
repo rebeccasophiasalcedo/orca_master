@@ -1,0 +1,361 @@
+---
+title: "orca basin JGI project scoping"
+output: html_document
+date: "2024-11-22"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load libraries}
+library(tidyr)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(data.table)
+library(plyr)
+```
+
+```{r set root directory}
+rootdir = "/oak/stanford/groups/dekas/sequences/OAST/orca_basin2023/JGI_MGMT_2024/"
+```
+
+```{r print out existing directory structure}
+# Set your working directory to the main folder containing all the sample subdirectories
+setwd(rootdir)
+
+dir_structure <- list.files(path = ".", recursive = TRUE, full.names = FALSE)
+
+# Print the directory structure to the console
+cat("Directory Structure:\n")
+cat(paste(dir_structure, collapse = "\n"))
+
+# Save the directory structure to a text file for sharing
+writeLines(dir_structure, paste0(oak,"/directory_structure.txt"))
+
+```
+
+```{r reorganize files by type}
+# Set your working directory to the folder containing all subdirectories
+setwd(rootdir)
+
+# List all files recursively
+files <- list.files(path = ".", recursive = TRUE, full.names = TRUE)
+
+# Define the common prefix to remove from directory names (main folder pattern)
+root_dir_pattern <- "Development_of_metagenomic_and_metatranscriptomic_data_for_the_discovery_of_novel_biogeochemical_processes_in_Orca_Basin__"
+
+# Function to extract the sample ID from the root directory (top-level directory)
+get_sample_id <- function(filepath) {
+  # Split the path into components
+  path_components <- strsplit(filepath, "/")[[1]]
+  
+  # Find the first directory that matches the root pattern
+  for (component in path_components) {
+    if (grepl(root_dir_pattern, component)) {
+      sample_id <- sub(root_dir_pattern, "", component)
+      return(sample_id)
+    }
+  }
+  
+  # Return empty if no matching root directory is found
+  return("")
+}
+
+# Function to classify analysis type based on directory names
+get_analysis_type <- function(filepath) {
+  if (grepl("Raw_Data", filepath)) return("Raw_Data")
+  if (grepl("Filtered_Raw_Data", filepath)) return("Filtered_Raw_Data")
+  if (grepl("QC_and_Genome_Assembly", filepath)) return("QC_and_Genome_Assembly")
+  if (grepl("Metagenome_Report_Tables", filepath)) return("Metagenome_Report_Tables")
+  if (grepl("IMG_Data", filepath)) return("IMG_Data")
+  if (grepl(".sh$", filepath)) return("Scripts")
+  return("Other")
+}
+
+# Initialize a list to store log entries
+log_entries <- list()
+
+# Iterate through all files
+for (file in files) {
+  # Get the sample ID from the root directory (main folder)
+  sample_id <- get_sample_id(file)
+  
+  # Check if we got a sample ID
+  if (sample_id == "") {
+    next # Skip this file if no valid sample ID was found
+  }
+  
+  # Determine the analysis type based on the directory path
+  analysis_type <- get_analysis_type(file)
+  
+  # Create the target directory for the analysis type if it doesn't exist
+  dir.create(analysis_type, recursive = TRUE, showWarnings = FALSE)
+  
+  # Append the sample ID to the file name
+  new_filename <- paste0(sample_id, "_", basename(file))
+  
+  # Generate the new file path
+  new_path <- file.path(analysis_type, new_filename)
+  
+  # Move the file into the new structure
+  file.rename(file, new_path)
+  
+  # Log the original and new paths
+  log_entries <- append(log_entries, list(c(original = file, new = new_path)))
+}
+
+# Convert the log entries to a data frame
+log_df <- do.call(rbind.data.frame, log_entries)
+colnames(log_df) <- c("Original_Path", "New_Path")
+
+# Export the log to a CSV file
+write.csv(log_df, "file_reorganization_log.csv", row.names = FALSE)
+
+cat("File reorganization completed. Log saved to 'file_reorganization_log.csv'.\n")
+
+
+```
+
+```{r remove old empty directories and further organize}
+#system("rm -rf Development_of_metagenomic_and_metatranscriptomic_data_for_the_discovery_of_novel_biogeochemical_processes_in_Orca_Basin__2*")
+
+dir.create(paste0(rootdir, "Raw_Data/fastq/"))
+dir.create(paste0(rootdir, "Raw_Data/txt/"))
+dir.create(paste0(rootdir, "Raw_Data/sh/"))
+dir.create(paste0(rootdir, "Raw_Data/chaff/"))
+
+dir.create(paste0(rootdir, "QC_and_Genome_Assembly/bams/"))
+dir.create(paste0(rootdir, "QC_and_Genome_Assembly/sams/"))
+dir.create(paste0(rootdir, "QC_and_Genome_Assembly/READMEs/"))
+dir.create(paste0(rootdir, "QC_and_Genome_Assembly/scaffolds/"))
+dir.create(paste0(rootdir, "QC_and_Genome_Assembly/contigs/"))
+
+dir.create(paste0(rootdir, "Metagenome_Report_Tables/Table3/"))
+dir.create(paste0(rootdir, "Metagenome_Report_Tables/Table4/"))
+dir.create(paste0(rootdir, "Metagenome_Report_Tables/Table5/"))
+dir.create(paste0(rootdir, "Metagenome_Report_Tables/Table6/"))
+dir.create(paste0(rootdir, "Metagenome_Report_Tables/Table7/"))
+dir.create(paste0(rootdir, "Metagenome_Report_Tables/Table8/"))
+dir.create(paste0(rootdir, "Metagenome_Report_Tables/Table9/"))
+
+```
+
+```{r get file size}
+# Set your working directory to the folder containing all subdirectories
+setwd(paste0(rootdir, "/Raw_Data/"))
+
+# Function to extract the sample ID directly from the file name
+get_sample_id <- function(filename) {
+  # Extract sample ID directly from the filename 
+  sample_id <- sub("^(.*?)(?:_\\[.*\\])?$", "\\1", basename(filename))
+  return(sample_id)
+}
+
+# Function to classify nucleic acid type based on the sample ID in the file name
+get_nucleic_acid_type <- function(sample_id) {
+  if (grepl("DNA", sample_id, ignore.case = TRUE)) {
+    return("DNA")
+  } else if (grepl("RNA", sample_id, ignore.case = TRUE)) {
+    return("RNA")
+  } else if (grepl("virome", sample_id, ignore.case = TRUE)) {
+    return("Virome")
+  } else {
+    return("Unknown")  # Default if no match is found
+  }
+}
+
+# Function to calculate the file size in GB
+get_file_size_GB <- function(filepath) {
+  # Get the file size in bytes
+  file_size_bytes <- file.info(filepath)$size
+  
+  # Convert bytes to gigabytes
+  file_size_GB <- file_size_bytes / (1024^3)  # 1 GB = 1024^3 bytes
+  return(file_size_GB)
+}
+
+# List all files in the Raw_Data directory (or any directory you wish to analyze)
+raw_data_files <- list.files(path = "fastq", recursive = TRUE, full.names = TRUE)
+
+# Initialize an empty list to store data for the data frame
+file_info <- list()
+
+# Iterate through all files in the Raw_Data directory
+for (file in raw_data_files) {
+  # Get the sample ID from the file name
+  sample_id <- get_sample_id(file)
+  
+  # Skip if no valid sample ID found
+  if (sample_id == "") next
+  
+  # Get the nucleic acid type based on the sample ID
+  nucleic_acid_type <- get_nucleic_acid_type(sample_id)
+  
+  # Get the file size in GB
+  file_size_GB <- get_file_size_GB(file)
+  
+  # Store the sample ID, nucleic acid type, and file size in the list
+  file_info <- append(file_info, list(c(sample = sample_id, nucleic_acid = nucleic_acid_type, file_size_GB = file_size_GB)))
+}
+
+# Convert the list to a data frame
+file_info_df <- do.call(rbind.data.frame, file_info)
+colnames(file_info_df) <- c("file_name", "Nucleic_Acid", "File_Size_GB")
+
+file_info_df$sample = sub("\\].*", "]", file_info_df$file_name)
+
+```
+
+```{r summarize library prep tables}
+read_table3_files <- function(directory) {
+ # List all .txt files in the Table3 directory
+  files <- list.files(path = directory, pattern = "\\.txt$", full.names = TRUE)
+  
+  # Initialize a list to store the data for each file
+  data_list <- list()
+  
+  # Loop through each file
+  for (file in files) {
+    # Read the file line by line
+    lines <- readLines(file, warn = FALSE)
+    
+    # Skip files with no content
+    if (length(lines) == 0) next
+    
+    # Extract key-value pairs and remove the prefix "assy.SIG.3."
+    key_value_pairs <- lapply(lines, function(line) {
+      # Split by "=" to separate key and value
+      parts <- strsplit(line, "=", fixed = TRUE)[[1]]
+      
+      # Handle cases where "=" is missing
+      if (length(parts) < 2) return(NULL)
+      
+      # Remove the prefix from the key
+      key <- gsub("^assy\\.SIG\\.3\\.", "", parts[1])
+      value <- parts[2]
+      return(c(key, value))
+    })
+    
+    # Filter out NULL entries (invalid lines)
+    key_value_pairs <- do.call(rbind, key_value_pairs[!sapply(key_value_pairs, is.null)])
+    
+    # Convert the key-value pairs into a named vector
+    named_values <- setNames(key_value_pairs[, 2], key_value_pairs[, 1])
+    
+    # Add the named vector as a row to the data list, using the file name as the row name
+    data_list[[basename(file)]] <- named_values
+  }
+  
+  # Combine all named vectors into a single data frame, filling missing columns with NA
+  combined_data <- rbind.fill(lapply(data_list, function(x) as.data.frame(t(x), stringsAsFactors = FALSE)))
+  
+  # Set the row names to the file names
+  rownames(combined_data) <- names(data_list)
+  
+  # Convert columns to their appropriate data types
+  combined_data[] <- lapply(combined_data, type.convert, as.is = TRUE)
+  
+  return(combined_data)
+}
+
+# Example usage
+directory <- paste0(rootdir, "Metagenome_Report_Tables/Table3/")
+table3_data <- read_table3_files(directory)
+
+table3_data$file_name = rownames(table3_data)
+table3_data$sample = gsub("_Table_3_library_information.txt", "", table3_data$file_name)
+
+rownames(table3_data) = NULL
+
+# Save to CSV for further analysis
+write.csv(table3_data, "table3_combined_data.csv", row.names = TRUE)
+
+```
+
+```{r merge and write to csv}
+sequencing_info_df = merge(file_info_df, table3_data, by = "sample", all = TRUE)
+write.csv(sequencing_info_df, paste0(rootdir, "/sequencing_info.csv"), row.names = FALSE)
+```
+
+```{r}
+# Load necessary package
+
+# Create an empty data frame to store results
+results <- data.frame(FileName = character(), Value = numeric(), stringsAsFactors = FALSE)
+
+# Define the directory containing the text files
+directory <- "/oak/stanford/groups/dekas/sequences/OAST/orca_basin2023/JGI_MGMT_2024/QC_and_Genome_Assembly/READMEs/txt" # Update this to your actual directory path
+
+directory
+
+# List all text files in the directory
+file_list <- list.files(directory, pattern = "*.txt", full.names = TRUE)
+
+# Loop through each file
+for (file in file_list) {
+  # Read the file content
+  file_content <- readLines(file)
+  
+  # Search for the row containing 'Main genome contig N/L50'
+  line <- grep("Main genome contig N/L50", file_content, value = TRUE)
+  
+  if (length(line) > 0) {
+    # Extract the value before the slash using regular expression
+    value <- str_extract(line, "(\\d+)(?=/)")
+    
+    # Add the file name and extracted value to the results data frame
+    results <- rbind(results, data.frame(FileName = basename(file), Value = as.numeric(value), stringsAsFactors = FALSE))
+  }
+}
+
+filtered_results <- results[grepl("DNA", results$FileName), ]
+
+filtered_results$file_name <- sub("\\[.*", "", filtered_results$FileName)
+filtered_results$file_name <- sub("DNA_", "DNA", filtered_results$file_name)
+
+df = merge(filtered_results, assembly_stats_summary, by = "file_name", all.x = TRUE)
+
+ggplot(data = df) + geom_point(aes(x=ctg_N50, y=Value)) + ylim(0,784878) +xlim(0,33856)
+
+```
+
+```{r stats command}
+
+dir.create(paste0(rootdir, "QC_and_Genome_Assembly/assembly_stats/"))
+
+files = list.files(paste0(rootdir, "QC_and_Genome_Assembly/contigs/DNA"), pattern = "fasta$", full.names = TRUE)
+file_list = sub("\\..*$", "", files)
+
+sample_list = sub("/oak/stanford/groups/dekas/sequences/OAST/orca_basin2023/JGI_MGMT_2024/QC_and_Genome_Assembly/contigs/DNA/", "", file_list)
+
+
+sink(paste0(rootdir, "bbtool_stats.sh"))
+for (i in sample_list) {
+  cat("sbatch -J bbstats", i, " -c 20 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'stats.sh in=", rootdir, "QC_and_Genome_Assembly/contigs/DNA/", i, ".contigs.fasta out=", rootdir, "QC_and_Genome_Assembly/assembly_stats/", i, ".stats.tsv format=3'", "\n", sep = "")
+}
+sink()
+file.show(paste0(rootdir, "bbtool_stats.sh"))
+```
+
+```{r stats parsing}
+# Set the path to your directory containing the TSV files
+directory_path <- paste0(rootdir, "QC_and_Genome_Assembly/assembly_stats/")
+
+# List all the TSV files in the directory
+file_list <- list.files(directory_path, pattern = "\\.tsv$", full.names = TRUE)
+
+# Function to read a TSV file and add file name as a column
+read_tsv_file <- function(file) {
+  df <- read_tsv(file)
+  df$file_name <- sub("\\.stats\\.tsv$", "", basename(file))  # Remove ".tsv" extension
+  df <- df %>% select(file_name, everything())       # Make file_name the first column
+  return(df)
+}
+
+# Read and bind all files
+stats_df <- bind_rows(lapply(file_list, read_tsv_file))
+
+write.csv(stats_df, paste0(rootdir, "assembly_stats_summary.csv"), row.names = FALSE)
+```

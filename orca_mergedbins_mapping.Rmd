@@ -1,0 +1,190 @@
+---
+title: "orca_mergedbins_mapping"
+output: html_document
+date: "2025-02-11"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set up
+```{r load libraries, message=FALSE, warning=FALSE}
+library(tidyr)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(data.table)
+library(stringr)
+```
+
+```{r setup working environment}
+rootdir = "/scratch/users/rsalcedo/orca_allbins/"
+JGIreaddir = "/scratch/users/rsalcedo/orca_JGI/reads/trimmed_reads/"
+genomedir = "/scratch/users/rsalcedo/orca_allbins/drep/dereplicated_genomes/"
+drep_binlist = gsub(".fa", "",list.files(genomedir))
+
+RSGreaddir = "/scratch/users/rsalcedo/orca_RSG/reads/trimmed_reads/"
+
+RSG_sorts = c("Orca_NoAmp_15_S506", "Orca33_S509", "ORCA_15_C5B42202_S121", "Orca_NoAmp_13_S505", "Orca31_S507", "ORCA_13_C5B42202_S120", "Orca32_S508")
+RSG_in_situ = c("Orca-CTD10BTL6_S511", "Orca-CTD5BTL4_S510")
+
+RSG_files = list.files("/scratch/users/rsalcedo/orca_RSG/reads/trimmed_reads", pattern = "fastq$", full.names = TRUE)
+
+RSG_samples = sub("\\..*$", "", RSG_files)
+RSG_samples = sub("/scratch/users/rsalcedo/orca_RSG/reads/trimmed_reads/", "", RSG_samples)
+RSG_samples = sub("_R1_trimmed", "", RSG_samples)
+RSG_samples = sub("_R2_trimmed", "", RSG_samples)
+RSG_samples = unique(RSG_samples)
+
+JGI_files = list.files("/scratch/users/rsalcedo/orca_JGI/reads/raw_interleaved_reads", pattern = "fastq.gz$", full.names = TRUE)
+
+JGI_samples = sub("\\..*$", "", JGI_files)
+JGI_samples = sub("/scratch/users/rsalcedo/orca_JGI/reads/raw_interleaved_reads/", "", JGI_samples)
+
+all_samples = c(JGI_samples, RSG_samples)
+```
+
+# modify genome contig headers to ID which sample and bin said contig came from
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=modify_fasta
+#SBATCH -p serc
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=4G
+#SBATCH --time=2:00:00
+
+# Set the directory containing FASTA files
+FASTA_DIR="/scratch/users/rsalcedo/orca_allbins/drep/dereplicated_genomes"
+OUTPUT_DIR="/scratch/users/rsalcedo/orca_allbins/drep/modheader_dereplicated_genomes"
+mkdir -p "$OUTPUT_DIR"
+
+# Process each FASTA file
+for file in "$FASTA_DIR"/*.fa; do
+  sample=$(basename "$file" .fa)
+  awk -v sample="$sample" '/^>/ {print ">" sample "_" substr($0,2); next} {print}' "$file" > "$OU
+TPUT_DIR/$sample.fa"
+done
+```
+
+#coverM for all genomes including RSG
+
+```{r create directories}
+dir.create(paste0(rootdir, "/coverm/"))
+```
+
+```{r generate coverm commands}
+commands <- vector("character", length(all_samples))  
+index <- 1  
+
+for (i in RSG_samples) {  
+  commands[index] <- paste0("coverm genome --coupled ", RSGreaddir, i, "_R1_trimmed.fastq ", RSGreaddir, i, "_R2_trimmed.fastq --genome-fasta-directory ", rootdir, "drep/modheader_dereplicated_genomes/ -x fa -t 20 --min-read-percent-identity 95 --output-format sparse --min-covered-fraction 0 -m count mean covered_fraction length -o ", rootdir, "coverm/", i, "_coverM.tsv")  
+  index <- index + 1  
+}  
+
+for (i in JGI_samples) {  
+  commands[index] <- paste0("coverm genome --coupled ", JGIreaddir, i, "_R1_trimmed.fastq ", JGIreaddir, i, "_R2_trimmed.fastq --genome-fasta-directory ", rootdir, "drep/modheader_dereplicated_genomes/ -x fa -t 20 --min-read-percent-identity 95 --output-format sparse --min-covered-fraction 0 -m count mean covered_fraction length -o ", rootdir, "coverm/", i, "_coverM.tsv")  
+  index <- index + 1  
+}  
+
+# Number of commands per file
+num_files <- 15
+commands_per_file <- ceiling(length(commands) / num_files)
+
+# Write commands to files
+for (i in seq_len(num_files)) {
+  start <- (i - 1) * commands_per_file + 1
+  end <- min(i * commands_per_file, length(commands))
+  subset_commands <- commands[start:end]
+  file_name <- sprintf("coverm_commands_part_%02d.sh", i)
+  writeLines(subset_commands, paste0(rootdir, "/sh_scripts/", file_name))
+}
+
+#wrap the commands to sbatch them
+integer_list = 1:15
+
+all_commands <- vector("character", length(integer_list))
+
+for (i in integer_list) {
+    formatted_i <- sprintf("%02d", i)
+    all_commands[i] <- paste("sbatch -J coverm", formatted_i, " -c 20 --mem-per-cpu 4G -p serc -t 160:00:00 --wrap '", rootdir, "/sh_scripts/coverm_commands_part_", formatted_i, ".sh'", sep = "")
+}
+
+# Write all commands to a single file
+writeLines(all_commands, paste0(rootdir, "sh_scripts/all_coverm_commands.sh"))
+```
+
+parsing coverM and merging 
+```{r parsing coverM and merging, message=FALSE, warning=FALSE}
+for(i in all_samples) {                                           
+  coverM = read_tsv(paste(rootdir, "coverm/", i, "_coverM.tsv", sep = ""), col_names = TRUE)
+  coverM$Sample = gsub("_R1_trimmed.fastq.gz", "", coverM$Sample)
+  coverM = rename(coverM, genome = Genome)
+  coverM$genome = gsub("_contigs", "", coverM$genome)
+  coverM = rename(coverM, covered_fraction = "Covered Fraction")
+  assign(paste("coverM_", i, sep = ""), coverM)
+}
+
+df_list = mget(ls(pattern = "coverM_"))
+coverM = rbindlist(df_list, use.names = TRUE)
+
+write_csv(coverM, paste(rootdir, "coverm/coverM_raw.csv", sep = ""))
+
+sample_cov = coverM %>% 
+  group_by(Sample) %>% 
+  summarise(Mean = sum(Mean))
+
+coverM = left_join(coverM, sample_cov, "Sample")
+coverM <- coverM %>% 
+  rename_with(~ "sample_cov", starts_with("Mean.y"))
+coverM <- coverM %>% 
+  rename_with(~ "genome_cov", starts_with("Mean.x"))
+coverM$relative = coverM$genome_cov/coverM$sample_cov
+
+coverM$Sample <- gsub("_R1_trimmed.fastq", "", coverM$Sample)
+coverM <- coverM %>% 
+  rename_with(~ "file_name", Sample)
+
+write_csv(coverM, paste(rootdir, "coverm/coverM_raw_relative.csv", sep = ""))
+
+coverm_QC = filter(coverM, covered_fraction >= 0.50)
+sample_cov = coverm_QC %>% 
+  group_by(Sample) %>% 
+  summarise(Mean = sum(Mean))
+
+coverm_QC = left_join(coverm_QC, sample_cov, "Sample")
+coverm_QC <- coverm_QC %>% 
+  rename_with(~ "sample_cov", starts_with("Mean.y"))
+coverm_QC <- coverm_QC %>% 
+  rename_with(~ "genome_cov", starts_with("Mean.x"))
+coverm_QC$relative = coverm_QC$genome_cov/coverm_QC$sample_cov
+
+coverm_QC$Sample <- gsub("_R1_trimmed.fastq", "", coverm_QC$Sample)
+coverm_QC <- coverm_QC %>% 
+  rename_with(~ "file_name", Sample)
+
+write_csv(coverm_QC, paste(rootdir, "coverm/coverm_QC.csv", sep = ""))
+```
+
+#modify to match jeff's format
+```{r}
+coverm_wide <- coverM %>%
+  select(file_name, genome, relative) %>%
+  pivot_wider(
+    names_from = genome,
+    values_from = relative
+  )
+
+write_csv(coverm_wide, paste(rootdir, "coverm/coverm_wide.csv", sep = ""))
+
+covermQC_wide <- coverm_QC %>%
+  select(file_name, genome, relative) %>%
+  pivot_wider(
+    names_from = genome,
+    values_from = relative
+  )
+
+write_csv(covermQC_wide, paste(rootdir, "coverm/coverm_QC_wide.csv", sep = ""))
+```

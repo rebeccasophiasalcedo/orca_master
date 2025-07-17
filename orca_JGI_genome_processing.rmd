@@ -1,0 +1,760 @@
+---
+title: "orca_JGI_genome_processing"
+output: html_document
+date: "2025-01-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set up
+```{r load libraries, message=FALSE, warning=FALSE}
+library(tidyr)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(data.table)
+library(stringr)
+library(pheatmap)
+library(Rtsne)
+library(purrr)
+library(treemap)
+
+```
+
+```{r define rootdirectories}
+oak = "/oak/stanford/groups/dekas/sequences/OAST/orca_basin2023/JGI_MGMT_2024/Raw_Data/fastq/"
+rootdir = "/scratch/users/rsalcedo/orca_JGI/"
+seqdir = paste0(rootdir, "reads/")
+```
+
+```{r define sample list}
+files = list.files(paste0(rootdir, "reads/raw_interleaved_reads"), pattern = "fastq.gz$", full.names = TRUE)
+
+sample_list = sub("\\..*$", "", files)
+sample_list = sub("/scratch/users/rsalcedo/orca_JGI/reads/raw_interleaved_reads/", "", sample_list)
+```
+
+# Bin Genomes with MetaBat
+## ID similar samples with SOURMASH
+```{r sourmash compute}
+#activate conda sourmash environment
+dir.create(paste0(rootdir, "sourmash/"))
+
+sink(paste(rootdir, "sh_scripts/sourmash_compute.sh", sep = ""))
+for (i in sample_list)
+  cat("sbatch -J SM_pute -c 20 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'sourmash compute --track-abundance ", rootdir, "megahit/contigs/", i, ".contigs.fa --output ", rootdir, "sourmash/", i, ".sig'\n", sep = "")
+sink()
+file.show(paste(rootdir, "sh_scripts/sourmash_compute.sh", sep = ""))
+```
+
+```{r sourmash compare command}
+sink(paste(rootdir, "sh_scripts/sourmash_compare.sh", sep = ""))
+  cat("sbatch -J SM_pare -c 20 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'sourmash compare ", rootdir, "sourmash/sig_files/* -o ", rootdir, "sourmash/all_compare -k 31 --csv ", rootdir, "sourmash/orcajgi.cmp.csv'\n", sep = "")
+sink()
+file.show(paste(rootdir, "sh_scripts/sourmash_compare.sh", sep = ""))
+```
+
+```{r sourmash compare plot command}
+sink(paste(rootdir, "sh_scripts/sourmash_plot.sh", sep = ""))
+  cat("sbatch -J SMplot -c 20 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'sourmash plot --pdf --labels ", rootdir, "sourmash/all_compare --output-dir ", rootdir, "sourmash/'\n", sep = "")
+sink()
+file.show(paste(rootdir, "sh_scripts/sourmash_plot.sh", sep = ""))
+```
+
+```{r plotting sourmash compare values}
+sourmash_comp_values <- read.csv(paste0(rootdir, "/sourmash/orcajgi.cmp.csv"))
+
+colnames(sourmash_comp_values) = gsub("X.scratch.users.rsalcedo.orca_JGI.megahit.contigs.", "", colnames(sourmash_comp_values))
+
+# Label the rows
+rownames(sourmash_comp_values) <- colnames(sourmash_comp_values)
+write.csv(sourmash_comp_values, paste0(rootdir, "/sourmash/orcajgi.cmp_mod.csv"))
+# Transform for plotting
+sourmash_comp_matrix <- as.matrix(sourmash_comp_values)
+
+# Make mds plot
+fit <- dist(sourmash_comp_matrix)
+fit <- cmdscale(fit)
+x <- fit[, 1]
+y <- fit[, 2]
+plot(fit[ , 1], fit[ , 2], xlab = "Dimension 1", ylab = "Dimension 2")
+
+#make tsne plot
+tsne_model <- Rtsne(sourmash_comp_matrix, check_duplicates=FALSE, pca=TRUE, perplexity=5, theta=0.5, dims=2)
+d_tsne = as.data.frame(tsne_model$Y) 
+plot(d_tsne$V1, d_tsne$V2)
+
+#Make clustered heatmap
+hc.rows <- hclust(dist(sourmash_comp_matrix))
+hc.cols <- hclust(dist(t(sourmash_comp_matrix)))
+pheatmap(sourmash_comp_matrix[cutree(hc.rows,k=2)==1,], Colv=as.dendrogram(hc.cols), scale='none', angle_col = 45, color = colorRampPalette(c("white", "orange", "red"))(25), fontsize = 5)
+
+
+# Make unclustered heatmap
+heatmap(sourmash_comp_matrix, Colv=F, scale='none')
+
+pheatmap(sourmash_comp_matrix, angle_col = 45,color = colorRampPalette(c("white", "orange", "red"))(25), fontsize = 5)
+
+heatmap = pheatmap(sourmash_comp_matrix, angle_col = 45,color = colorRampPalette(c("white", "orange", "red"))(25), fontsize = 5, filename = paste0(rootdir, "/r_output/sourmash_heatmap.png"))$gtable
+
+heatmap
+
+ggsave(paste0(rootdir, "/r_output/sourmash_heatmap.png"), plot=heatmap, units = "in", width = 12, height = 12)
+```
+
+```{r ID crossmapping pairs}
+df <- as.data.frame(as.table(as.matrix(sourmash_comp_values)))
+colnames(df) <- c("sample_1", "sample_2", "value")
+
+# filter by similarity
+threshold <- 0.15
+filtered_df <- df %>%
+  filter(value >= threshold)
+
+# remove duplicate pairs
+result_df <- filtered_df %>%
+  mutate(pair = pmap_chr(list(sample_1, sample_2), ~ paste(sort(c(..1, ..2)), collapse = "_"))) %>%
+  distinct(pair, .keep_all = TRUE) %>%
+  select(sample_1, sample_2, value)
+
+result_df$sample_1 = gsub(".contigs.fa", "", result_df$sample_1)
+result_df$sample_1 = gsub("\\.", "-", result_df$sample_1)
+
+result_df$sample_2 = gsub(".contigs.fa", "", result_df$sample_2)
+result_df$sample_2 = gsub("\\.", "-", result_df$sample_2)
+
+# check that each sample has sufficient cross mapping (should be >5/sample)
+pair_counts <- result_df %>%
+  pivot_longer(cols = c(sample_1, sample_2), names_to = "column", values_to = "sample") %>%
+  dplyr::group_by(sample) %>%
+  dplyr::summarise(pair_count = n()) %>%
+  dplyr::arrange(desc(pair_count))
+```
+
+## cross map with bowtie2
+```{r build bowtie indexes}
+#system("conda activate base_metagenomics")
+
+sink(paste0(rootdir, "/sh_scripts/assembly_bowtie_build.sh"))
+for (i in sample_list) {
+  cat("sbatch -J ", i, "_build -c 20 --mem-per-cpu 4G -p serc -t 160:00:00 --wrap 'bowtie2-build ", rootdir, "megahit/contigs/", i, ".contigs.fa ", rootdir, "assembly_analysis/bowtie/indexes/", i, "_contigs'\n", sep = "")
+  }
+sink()
+file.show(paste0(rootdir, "sh_scripts/assembly_bowtie_build.sh"))
+```
+
+```{r generate cross mapping commds using paires ID'd above}
+commands <- vector("character", nrow(result_df)) 
+
+for (i in seq_len(nrow(result_df))) {
+  sample1 <- result_df$sample_1[i]
+  sample2 <- result_df$sample_2[i]
+  
+  commands[i] <- sprintf("bowtie2 -x %sassembly_analysis/bowtie/indexes/%s_contigs -1 %strimmed_reads/%s_R1_trimmed.fastq -2 %strimmed_reads/%s_R2_trimmed.fastq -S %sassembly_analysis/bowtie/sams/%s_reads_to_%s_contigs.sam", rootdir, sample1, seqdir, sample2, seqdir, sample2, rootdir, sample2, sample1)
+}
+
+head(commands)
+
+# Number of commands per file
+num_files <- 30
+commands_per_file <- ceiling(length(commands) / num_files)
+
+# Write commands to files
+for (i in seq_len(num_files)) {
+  start <- (i - 1) * commands_per_file + 1
+  end <- min(i * commands_per_file, length(commands))
+  subset_commands <- commands[start:end]
+  file_name <- sprintf("xmap_bowtie2_commands_part_%02d.sh", i)
+  writeLines(subset_commands, paste0(rootdir, "/sh_scripts/", file_name))
+}
+
+#wrap the commands to sbatch them
+integer_list = 1:30
+
+xmap_commands <- vector("character", length(integer_list))
+
+for (i in integer_list) {
+    formatted_i <- sprintf("%02d", i)
+    xmap_commands[i] <- paste("sbatch -J xmap", formatted_i, " -c 20 --mem-per-cpu 4G -p serc -t 160:00:00 --wrap '", rootdir, "/sh_scripts/xmap_bowtie2_commands_part_", formatted_i, ".sh'", sep = "")
+}
+
+# Write all commands to a single file
+writeLines(xmap_commands, paste0(rootdir, "sh_scripts/all_xmap_commands.sh"))
+```
+
+```{r define sam file paths and names}
+# Define the root directory and paths
+sam_dir <- paste0(rootdir, "assembly_analysis/bowtie/sams/")
+bam_dir <- paste0(rootdir, "assembly_analysis/bowtie/bams/")
+scripts_dir <- paste0(rootdir, "sh_scripts/")
+
+# Get a list of all .sam files in the sam directory
+sam_files <- list.files(sam_dir, pattern = "\\.sam$", full.names = TRUE)
+
+# Write the file list to a text file
+file_list_path <- paste0(scripts_dir, "sam_files_list.txt")
+writeLines(sam_files, file_list_path)
+```
+
+```{rarray to convert sam to bam and sort}
+slurm_script <- '#!/bin/bash
+#SBATCH --job-name=bowtie_sort
+#SBATCH --array=0-766:10
+#SBATCH -n 10
+#SBATCH --cpus-per-task=8
+#SBATCH -p serc
+#SBATCH --mem-per-cpu=4G
+#SBATCH --partition=serc
+#SBATCH --time=160:00:00
+
+FILE_LIST="/scratch/users/rsalcedo/orca_JGI/sh_scripts/sam_files_list.txt"
+BAM_DIR="/scratch/users/rsalcedo/orca_JGI/assembly_analysis/bowtie/bams/"
+
+# Loop through 10 tasks within this array task
+for i in {0..9}; do
+    # Calculate the actual file index
+    FILE_INDEX=$((SLURM_ARRAY_TASK_ID + i))
+
+    # Get the SAM file for this task
+    SAM_FILE=$(sed -n "$((FILE_INDEX + 1))p" "$FILE_LIST")
+
+    # Skip if there are no more files to process
+    if [ -z "$SAM_FILE" ]; then
+        continue
+    fi
+
+    # Extract the base name and define the output BAM file
+    BASE_NAME=$(basename "$SAM_FILE" .sam)
+    BAM_FILE="${BAM_DIR}/${BASE_NAME}_sorted.bam"
+
+    # Run samtools sort and index in the background
+    srun -n 1 bash -c "samtools sort -@ 2 \\"$SAM_FILE\\" -o \\"$BAM_FILE\\"" &
+done
+
+# Wait for all background tasks to finish
+wait
+'
+
+# Write the script to a file
+writeLines(slurm_script, paste0(rootdir, "sh_scripts/bowtie_sort_array.sh"))
+
+file.show(paste0(rootdir, "sh_scripts/bowtie_sort_array.sh"))
+```
+
+```{r array to index bam}
+# Define the SLURM script content
+slurm_script <- '#!/bin/bash
+#SBATCH --job-name=bam_indexing
+#SBATCH --array=0-766:10
+#SBATCH -n 10
+#SBATCH --cpus-per-task=1
+#SBATCH -p serc
+#SBATCH --mem-per-cpu=1G
+#SBATCH --partition=serc
+#SBATCH --time=150:00:00
+
+FILE_LIST="/scratch/users/rsalcedo/orca_JGI/sh_scripts/sam_files_list.txt"
+BAM_DIR="/scratch/users/rsalcedo/orca_JGI/assembly_analysis/bowtie/bams/"
+
+# Loop through 10 tasks within this array task
+for i in {0..9}; do
+    # Calculate the actual file index
+    FILE_INDEX=$((SLURM_ARRAY_TASK_ID + i))
+
+    # Get the SAM file for this task
+    SAM_FILE=$(sed -n "$((FILE_INDEX + 1))p" "$FILE_LIST")
+
+    # Skip if there are no more files to process
+    if [ -z "$SAM_FILE" ]; then
+        continue
+    fi
+
+    # Extract the base name and define the sorted BAM file
+    BASE_NAME=$(basename "$SAM_FILE" .sam)
+    BAM_FILE="${BAM_DIR}/${BASE_NAME}_sorted.bam"
+
+    # Check if the BAM file exists before attempting to index
+    if [ -f "$BAM_FILE" ]; then
+        # Run samtools index in the background
+        srun -n 1 samtools index "$BAM_FILE" &
+    else
+        echo "Warning: BAM file $BAM_FILE does not exist. Skipping."
+    fi
+done
+
+# Wait for all background tasks to finish
+wait
+'
+
+# Write the script to a file
+writeLines(slurm_script, paste0(rootdir, "/bam_indexing_array.sh"))
+file.show(paste0(rootdir, "/bam_indexing_array.sh"))
+```
+
+## metabat commands
+```{r generate JGI contig depth file for each bin}
+system("ml gcc/12.1.0")
+
+# Define the SLURM script content as a string
+slurm_script <- '#!/bin/bash
+#SBATCH --job-name=jgicov
+#SBATCH --array=0-103:10
+#SBATCH -n 10
+#SBATCH --cpus-per-task=8
+#SBATCH --partition=serc
+#SBATCH --mem-per-cpu=4G
+#SBATCH --time=160:00:00
+
+FILE_LIST="/scratch/users/rsalcedo/orca_JGI/sh_scripts/sample2_names.txt"
+BAM_DIR="/scratch/users/rsalcedo/orca_JGI/assembly_analysis/bowtie/bams/"
+OUTPUT_DIR="/scratch/users/rsalcedo/orca_JGI/metabat/covdepth/"
+
+# Loop through 10 tasks within this array task
+for i in {0..9}; do
+    SAMPLE2_INDEX=$((SLURM_ARRAY_TASK_ID + i))
+
+    SAMPLE2_NAME=$(sed -n "$((SAMPLE2_INDEX + 1))p" "$FILE_LIST")
+    echo "Processing SAMPLE2_NAME: $SAMPLE2_NAME"
+
+    # Build the BAM_FILE pattern using the wildcard
+    BAM_FILE="${BAM_DIR}*_reads_to_${SAMPLE2_NAME}_contigs_sorted.bam"
+
+    # Debugging print command
+    echo "Debug: BAM_FILE pattern for SAMPLE2_NAME=$SAMPLE2_NAME is $BAM_FILE"
+
+    # Execute the jgi_summarize_bam_contig_depths command
+    srun -n 1 --exclusive jgi_summarize_bam_contig_depths --outputDepth "${OUTPUT_DIR}${SAMPLE2_NAME}.txt" $BAM_FILE &
+done
+
+# Wait for all background tasks to finish
+wait
+'
+
+# Write the script to a file
+writeLines(slurm_script, paste0(rootdir, "sh_scripts/jgicovdepth_array.sh"))
+file.show(paste0(rootdir, "sh_scripts/jgicovdepth_array.sh"))
+```
+
+```{r metabat with differential coverage}
+sink(paste(rootdir, "sh_scripts/metabat_binning.sh", sep = ""))
+for (i in sample_list)
+  cat("sbatch -J MB_bin -c 20 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'metabat -i ", rootdir, "megahit/contigs/", i, ".contigs.fa -a ", rootdir, "metabat/covdepth/", i, ".txt -o ", rootdir, "metabat/", i, "_bins/ -t 20 -m 1500 -d -v'\n", sep = "")
+sink()
+file.show(paste(rootdir, "sh_scripts/metabat_binning.sh", sep = ""))
+
+```
+
+## file moving
+```{r define function to rename bins}
+rename_files <- function(directory, pattern) {
+  # Debug: Print the directory being processed
+  print(paste("Processing directory:", directory))
+  
+  # Get all files in the directory that match the pattern
+  files <- list.files(directory, pattern = "\\.\\d{1,3}\\.fa$", full.names = TRUE, all.files = TRUE)
+  
+  # Debug: Print the files found
+  print(paste("Files found:", paste(files, collapse = ", ")))
+  
+  # Initialize a dataframe to store old and new names and num_value
+  renaming_log <- data.frame(
+    Old_Name = character(), 
+    Num_Value = character(), 
+    New_Name = character(), 
+    Rename_Status = character(),  # Track success or failure
+    stringsAsFactors = FALSE
+  )
+  
+  # Loop over each file and rename
+  for (file in files) {
+    # Extract the numeric value using regex with lookbehind
+    num_value <- str_extract(file, "(?<=\\.)\\d+")
+    
+    # Extract the original filename without the path
+    original_filename <- basename(file)
+    
+    # Create the new filename, appending the original name to ensure uniqueness
+    new_name <- paste0(directory, "/", pattern, num_value, ".fa")
+    
+    # Attempt to rename the file and track the status
+    rename_status <- if (file.rename(file, new_name)) {
+      "Success"
+    } else {
+      "Failure"
+    }
+    
+    # Log the old name, numeric value, new name, and status
+    renaming_log <- rbind(
+      renaming_log, 
+      data.frame(
+        Old_Name = file, 
+        Num_Value = num_value, 
+        New_Name = new_name, 
+        Rename_Status = rename_status, 
+        stringsAsFactors = FALSE
+      )
+    )
+  }
+  
+  # Return the renaming log
+  return(renaming_log)
+}
+```
+
+```{r run function}
+# Initialize an empty list to store all logs
+all_logs <- list()
+
+# Loop over the sample_names and call rename_files for each directory
+for (directory in sample_list) {
+  dir <- paste0(rootdir, "metabat/", directory, "_bins")  # Directory path
+  pattern <- paste0(directory, "_")  # Pattern prefix
+  
+  # Check if directory exists
+  if (dir.exists(dir)) {
+    log <- rename_files(dir, pattern)
+    all_logs[[directory]] <- log
+  } else {
+    print(paste("Directory does not exist:", dir))
+  }
+}
+
+# Combine all logs into one dataframe for easier inspection
+final_log <- do.call(rbind, all_logs)
+
+```
+
+```{r move bins and define binlist}
+dir.create(paste0(rootdir, "/metabat/all_bins/"))
+
+#in commandline
+#/scratch/users/rsalcedo/orca_JGI/metabat]$ cp *_bins/*.fa all_bins/
+
+bindir = paste0(rootdir, "metabat/all_bins/")
+binlist = gsub(".fa", "", list.files(path = bindir))
+length(binlist)
+#7079 redundant bins
+
+sink(paste(rootdir, "binlist.txt", sep = ""))
+writeLines(unlist(lapply(binlist, paste, collapse=" ")))
+sink()
+```
+
+# check bin quality with CheckM
+```{r create more directories}
+dir.create(paste0(rootdir, "/bin_analysis/"))
+dir.create(paste0(rootdir, "/bin_analysis/checkM/"))
+```
+
+```{r generate checkM command}
+sink(paste(rootdir, "sh_scripts/checkM.sh", sep = ""))
+  cat("sbatch -J checkM -c 20 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'checkm lineage_wf -t 20 --pplacer_threads 20 -x fa --tab_table ", rootdir, "metabat/all_bins/ ", rootdir, "bin_analysis/checkM/'", "\n", sep = "")
+sink()
+
+file.show(paste(rootdir, "sh_scripts/checkM.sh", sep = ""))
+
+system("chmod +x /scratch/users/rsalcedo/orca_RSG/sh_scripts/checkM.sh")
+```
+
+```{r generate checkM qa command}
+sink(paste(rootdir, "sh_scripts/checkM_qa.sh", sep = ""))
+  cat("sbatch -J checkM_qa -c 20 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'checkm qa -t 20 -o 1 -f ", rootdir, "bin_analysis/checkM/checkM_output.txt --tab_table ", rootdir, "bin_analysis/checkM/lineage.ms ", rootdir, "bin_analysis/checkM/'", "\n", sep = "")
+
+sink()
+
+file.show(paste(rootdir, "sh_scripts/checkM_qa.sh", sep = ""))
+system("chmod +x /scratch/users/rsalcedo/orca_RSG/sh_scripts/checkM_qa.sh")
+```
+
+```{r make genome information csv, message=FALSE, warning=FALSE}
+checkM_info = read_tsv(paste(rootdir, "bin_analysis/checkM/checkM_output.txt", sep = ""), col_names = TRUE)
+checkM_info = rename(checkM_info, contamination = Contamination)
+checkM_info = rename(checkM_info, completeness = Completeness)
+checkM_info = rename(checkM_info, genome = 'Bin Id')
+checkM_info = select(checkM_info, c("genome", "completeness", "contamination"))
+write.csv(checkM_info, paste0(rootdir, "r_output/checkm_qa.csv"), row.names = FALSE)
+```
+
+#GTDB-Tk
+```{r generate GTDB-Tk command}
+#switch base to base_metagenomics conda env
+sink(paste(rootdir, "sh_scripts/gtdbtk.sh", sep = ""))
+  cat("sbatch -J gtdbtk -c 32 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'gtdbtk classify_wf --genome_dir ", rootdir, "metabat/all_bins/ --out_dir ", rootdir, "bin_analysis/all_gtdb/ -x fa --cpus 32 --skip_ani_screen'", "\n", sep = "")
+sink()
+
+file.show(paste(rootdir, "sh_scripts/gtdbtk.sh", sep = ""))
+
+```
+
+```{r parse GTDB-Tk output, make genome summary}
+gtdb_bac_info = read_tsv(paste(rootdir, "bin_analysis/all_gtdb/gtdbtk.bac120.summary.tsv", sep = ""))
+gtdb_arc_info = read_tsv(paste(rootdir, "bin_analysis/all_gtdb/gtdbtk.ar53.summary.tsv", sep = ""))
+gtdb_info = rbind(gtdb_bac_info, gtdb_arc_info) %>% 
+  select(user_genome, classification) %>% 
+  rename("genome" = "user_genome")
+
+nrgenome_info = merge(checkM_info, gtdb_info, by = "genome")
+
+write.csv(nrgenome_info, paste0(rootdir, "/nr_genome_info_summary.csv"), row.names = FALSE)
+```
+#dRep
+```{r generate drep commmand}
+dir.create(paste0(rootdir, "/bin_analysis/drep/"))
+genomedir = paste0(rootdir, "metabat/all_bins/")
+
+#remember to activate drep conda env
+#ml python/3.6.1
+sink(paste(rootdir, "sh_scripts/dRep.sh", sep = ""))
+cat("sbatch -J dRep -c 48 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'dRep dereplicate ", rootdir, "bin_analysis/drep/ -g ", genomedir, "*.fa -sa 0.95 -comp 50 -con 25 -d -p 48'\n", sep = "")
+sink()
+
+file.show(paste(rootdir, "sh_scripts/dRep.sh", sep = ""))
+system("chmod +x /scratch/users/rsalcedo/orca_RSG/sh_scripts/dRep.sh")
+```
+
+```{r make drep bin list}
+drepdir = paste0(rootdir, "bin_analysis/drep/dereplicated_genomes/")
+drep_binlist = gsub(".fa", "", list.files(path = drepdir))
+length(drep_binlist)
+#399
+
+sink(paste(rootdir, "drepbinlist.txt", sep = ""))
+writeLines(unlist(lapply(drep_binlist, paste, collapse=" ")))
+sink()
+```
+
+```{r integrate drep into genome_summary}
+cdb = read.csv(paste0(rootdir,"bin_analysis/all_drep/data_tables/Cdb.csv"))
+drep_info = select(cdb, genome, primary_cluster, secondary_cluster)
+drep_info$genome = gsub(".fa", "", drep_info$genome)
+
+genome_info <- merge(drep_info, nrgenome_info, all.y = TRUE, by = "genome")
+genome_info <- genome_info %>%
+  mutate(drep_rep = ifelse(genome %in% drep_binlist, TRUE, FALSE))
+
+write.csv(genome_info, file = paste0(rootdir, "/genome_info_summary.csv"))
+
+drep_genome_info = genome_info %>% 
+  filter(drep_rep == "TRUE") %>% 
+  select(c(genome, completeness, contamination, classification))
+
+drep_genome_info <- drep_genome_info %>%
+  mutate(
+    phylum = sub(".*p__", "", sub("\\;c.*", "", classification)),
+    class = sub(".*c__", "", sub("\\;o.*", "", classification)),
+    label = paste(phylum, class, sep = "\n"),
+    kingdom = sub(".*d__", "", sub("\\;p.*", "", classification))
+  )
+
+length(unique(drep_genome_info$phylum))
+sum(grepl("Archaea", drep_genome_info$kingdom))
+sum(grepl("Bacteria", drep_genome_info$kingdom))
+```
+
+```{r assess completeness and contamination of drep set}
+drep_genomes = genome_info %>%
+  filter(drep_rep == TRUE)
+
+summary(drep_genomes)
+
+ggplot(drep_genomes) + 
+  geom_histogram(aes(x = completeness), binwidth = 1, fill = "palegreen", color = "black") +
+  theme_bw()
+
+ggplot(drep_genomes) + 
+  geom_histogram(aes(x = contamination), binwidth = 1, fill = "lightblue", color = "black") +
+  theme_bw()
+```
+
+```{r MIMAG assessment}
+qualitydf <- drep_genome_info %>%
+  mutate(
+    Set = case_when(
+      completeness >= 90 & contamination <= 5 ~ "HQ:>90%,<5%",
+      completeness >= 50 & contamination <= 10 ~ "MQ_draft:>50%,<10%",
+      completeness < 50 & contamination > 10 ~ "LQ_draft:<50%,>10%",
+      TRUE ~ "Other"                                  
+    )
+  ) %>%
+  group_by(Set) %>%                               
+  summarise(Count = n())            
+
+qualitydf$Set = gsub("Other", "LQ_draft:<50%,>10%", qualitydf$Set)
+
+print(qualitydf)
+
+qualitydf$Set <- factor(qualitydf$Set, levels = c("HQ:>90%,<5%", "MQ_draft:>50%,<10%", "LQ_draft:<50%,>10%"))
+
+ggplot(data = qualitydf) + geom_col(aes(x=Set, y=Count), fill = "lavender") + theme_bw() + ggtitle("MAG Counts based on Quality")
+```
+
+```{r visualize gtdb with a treemap}
+kingdom = drep_genome_info %>% 
+  filter(kingdom == "Bacteria")
+
+class_counts <- kingdom %>%
+  group_by(class) %>%
+  summarise(Count = n())
+
+class_counts$Label <- paste(class_counts$class, "\n(n=", class_counts$Count, ")", sep = "")
+
+png(paste0(rootdir,"/r_output/treemap_large.png"), width = 2000, height = 1200, res = 150) 
+
+treemap(
+  class_counts,
+  index = "Label",       # Use the custom label column
+  vSize = "Count",       # Size of rectangles based on count
+  title = "Bacteria - Number of Genomes Across Taxonomic Classes",
+  fontsize.labels = 10,   # Base font size
+  force.print.labels = TRUE,  # Force printing labels even in small areas
+  fontcolor.labels = "black", # Label color
+  palette = "Set3",      # Color palette
+  border.col = "black"   # Border color of rectangles
+)
+
+dev.off()
+```
+
+#prodigal
+```{r generate prodigal command}
+slurm_script = '#!/bin/bash
+#SBATCH --job-name=prodigal
+#SBATCH -p serc
+#SBATCH --time=160:00:00
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem-per-cpu=4G
+
+module purge
+module load biology
+module load devel
+module load system
+module load gcc
+
+for i in $(cat /scratch/users/rsalcedo/orca_JGI/drepbinlist.txt)
+do
+prodigal -i /scratch/users/rsalcedo/orca_JGI/bin_analysis/drep/dereplicated_genomes/${i}.fa -d /scratch/users/rsalcedo/orca_JGI/bin_analysis/prodigal/fna/${i}_ORFs.fna -a /scratch/users/rsalcedo/orca_JGI/bin_analysis/prodigal/faa/${i}_ORFs.faa -o /scratch/users/rsalcedo/orca_JGI/bin_analysis/prodigal/log/${i}.log
+done
+'
+
+# Write the script to a file
+writeLines(slurm_script, paste0(rootdir, "sh_scripts/bin_prodigal.sh"))
+
+file.show(paste(rootdir, "sh_scripts/bin_prodigal.sh", sep = ""))
+```
+
+# kofamscan
+```{r generate kofamscan commands}
+#remember to activate kofamscan conda environment
+#ml ruby
+
+commands <- vector("character", length(drep_binlist)) 
+
+kofam_exec <- "/home/groups/dekas/rebecca/kofamscan/kofam_scan-1.3.0/exec_annotation"
+ko_list <- "/home/groups/dekas/rebecca/kofamscan/ko_list"
+profiles <- "/home/groups/dekas/rebecca/kofamscan/profiles"
+faa_path <- "/scratch/users/rsalcedo/orca_JGI/bin_analysis/prodigal/faa"
+output_path <- "/scratch/users/rsalcedo/orca_JGI/bin_analysis/kofamscan/txt"
+tmpdir_base <- "/scratch/users/rsalcedo/orca_JGI/bin_analysis/kofamscan/tmpdirs"
+threads <- 32
+
+commands <- sapply(drep_binlist, function(i) {
+  tmpdir <- sprintf("%s/%s_tmpdir/", tmpdir_base, i)
+  
+  cmd <- sprintf(
+    "%s -o %s/%s_keggIDs.txt -k %s -p %s --cpu %d --tmp-dir %s %s/%s_ORFs.faa",
+    kofam_exec, output_path, i, ko_list, profiles, threads, tmpdir, faa_path, i
+  )
+  
+  return(cmd)
+})
+
+# Number of commands per file
+num_files <- 15
+commands_per_file <- ceiling(length(commands) / num_files)
+
+# Write commands to files
+for (i in seq_len(num_files)) {
+  start <- (i - 1) * commands_per_file + 1
+  end <- min(i * commands_per_file, length(commands))
+  subset_commands <- commands[start:end]
+  file_name <- sprintf("kofam_commands_part_%02d.sh", i)
+  writeLines(subset_commands, paste0(rootdir, "/sh_scripts/", file_name))
+}
+
+#wrap the commands to sbatch them
+integer_list = 1:15
+
+kofam_commands <- vector("character", length(integer_list))
+
+for (i in integer_list) {
+    formatted_i <- sprintf("%02d", i)
+    kofam_commands[i] <- paste("sbatch -J kofam", formatted_i, " -c 32 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap '", rootdir, "sh_scripts/kofam_commands_part_", formatted_i, ".sh'", sep = "")
+}
+
+# Write all commands to a single file
+writeLines(kofam_commands, paste0(rootdir, "sh_scripts/all_kofam_commands.sh"))
+```
+
+```{r generate kofamparse commands}
+commands <- vector("character", length(drep_binlist)) 
+
+kofamparse_path = "/home/groups/dekas/software/kofamparse/kofamparse"
+txt_path <- "/scratch/users/rsalcedo/orca_JGI/bin_analysis/kofamscan/txt"
+csv_path <- "/scratch/users/rsalcedo/orca_JGI/bin_analysis/kofamscan/csv"
+
+commands <- sapply(drep_binlist, function(i) {
+
+  cmd <- sprintf(
+    "%s %s/%s_keggIDs.txt %s/%s_keggIDs.csv",
+    kofamparse_path, txt_path, i, csv_path, i
+  )
+  
+  return(cmd)
+})
+
+# Number of commands per file
+num_files <- 15
+commands_per_file <- ceiling(length(commands) / num_files)
+
+# Write commands to files
+for (i in seq_len(num_files)) {
+  start <- (i - 1) * commands_per_file + 1
+  end <- min(i * commands_per_file, length(commands))
+  subset_commands <- commands[start:end]
+  file_name <- sprintf("koparse_commands_part_%02d.sh", i)
+  writeLines(subset_commands, paste0(rootdir, "/sh_scripts/", file_name))
+}
+
+#wrap the commands to sbatch them
+integer_list = 1:15
+
+kofam_commands <- vector("character", length(integer_list))
+
+for (i in integer_list) {
+    formatted_i <- sprintf("%02d", i)
+    kofam_commands[i] <- paste("sbatch -J kofam", formatted_i, " -c 1 --mem-per-cpu 2G -p serc -t 160:00:00 --wrap '", rootdir, "sh_scripts/koparse_commands_part_", formatted_i, ".sh'", sep = "")
+}
+
+# Write all commands to a single file
+writeLines(kofam_commands, paste0(rootdir, "sh_scripts/all_koparse_commands.sh"))
+```
+
+```{r kofamscan thresholding, message=FALSE, warning=FALSE}
+for(i in drep_binlist) {                                           
+  kegg = read_csv(paste(rootdir, "bin_analysis/kofamscan/csv/", i, "_keggIDs.csv", sep = ""), col_names = TRUE)
+  kegg$score = as.integer(kegg$score)
+  kegg$threshold = as.integer(kegg$threshold)
+  kegg = rename(kegg, gene = "Gene name") 
+  kegg = rename(kegg, KO = "KO number") 
+  kegg = rename(kegg, evalue = "e-value") 
+  kegg_besthit = kegg %>% 
+    group_by(gene) %>% 
+    slice_max(score)
+  kegg_besthit = subset(kegg_besthit, kegg_besthit$evalue < 1e-6)
+  kegg_besthit = subset(kegg_besthit, kegg_besthit$score >= 0.8*threshold)
+  write.csv(kegg_besthit, file = paste0(rootdir, "bin_analysis/kofamscan/csv_processed/", i, "_processed.csv"))
+}
+```

@@ -1,0 +1,442 @@
+---
+title: "generating orca merged bin set and corresponding annotation files"
+output: html_document
+date: "2025-02-05"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set up
+```{r load libraries, message=FALSE, warning=FALSE}
+library(tidyr)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(data.table)
+library(stringr)
+```
+
+```{r setup working environment}
+rootdir = "/scratch/users/rsalcedo/orca_allbins/"
+JGIreaddir = "/scratch/users/rsalcedo/orca_JGI/reads/trimmed_reads"
+genomedir = "/scratch/users/rsalcedo/orca_allbins/merged_bins/"
+```
+# Load in Jordan's longread bins
+```{r move and rename nanopore genomes}
+# Define main directories
+main_dir <- paste0(rootdir, "jordan_nanopore_bins/")
+output_dir <- paste0(rootdir, "nanopore_bins")
+
+dir.create(output_dir)
+
+# Get list of subdirectories
+subdirs <- list.dirs(main_dir, recursive = FALSE)
+
+# Loop through each subdirectory
+for (subdir in subdirs) {
+  
+  # Get the name of the subdirectory
+  subdir_name <- basename(subdir)
+  
+  # List all .fasta files in the subdirectory
+  fasta_files <- list.files(subdir, pattern = "^bin\\.\\d+\\.fasta$", full.names = TRUE)
+  
+  # Loop through each fasta file
+  for (file in fasta_files) {
+    
+    # Extract the numerical part from the filename
+    num_part <- str_extract(basename(file), "\\d+")
+    
+    # Construct the new filename
+    new_filename <- paste0("nanopore_",subdir_name, "_", num_part, ".fa")
+    
+    # Define the new file path in the all_bins/ directory
+    new_filepath <- file.path(output_dir, new_filename)
+    
+    print(new_filepath)
+    # Move and rename the file
+    file.rename(file, new_filepath)
+  }
+}
+```
+
+```{r move and rename hybrid genomes}
+# Define main directories
+main_dir <- paste0(rootdir, "jordan_hybrid_bins/")
+output_dir <- paste0(rootdir, "hybrid_bins")
+
+dir.create(output_dir)
+
+# Get list of subdirectories
+subdirs <- list.dirs(main_dir, recursive = FALSE)
+
+# Loop through each subdirectory
+for (subdir in subdirs) {
+  
+  # Get the name of the subdirectory
+  subdir_name <- basename(subdir)
+  
+  # List all .fasta files in the subdirectory
+  fasta_files <- list.files(subdir, pattern = "^bin\\.\\d+\\.fasta$", full.names = TRUE)
+  
+  # Loop through each fasta file
+  for (file in fasta_files) {
+    
+    # Extract the numerical part from the filename
+    num_part <- str_extract(basename(file), "\\d+")
+    
+    # Construct the new filename
+    new_filename <- paste0("hybrid_",subdir_name, "_", num_part, ".fa")
+    
+    # Define the new file path in the all_bins/ directory
+    new_filepath <- file.path(output_dir, new_filename)
+    
+    print(new_filepath)
+    # Move and rename the file
+    file.rename(file, new_filepath)
+  }
+}
+```
+
+## annotation for jordans bins
+```{r create directories}
+dir.create(paste0(rootdir, "jordan/"))
+dir.create(paste0(rootdir, "jordan/all_bins/"))
+dir.create(paste0(rootdir, "jordan/prodigal/"))
+dir.create(paste0(rootdir, "jordan/prodigal/faa/"))
+dir.create(paste0(rootdir, "jordan/prodigal/fna/"))
+dir.create(paste0(rootdir, "jordan/prodigal/log/"))
+dir.create(paste0(rootdir, "jordan/kofamscan/"))
+dir.create(paste0(rootdir, "jordan/kofamscan/txt/"))
+dir.create(paste0(rootdir, "jordan/kofamscan/csv/"))
+dir.create(paste0(rootdir, "jordan/kofamscan/csv_processed/"))
+dir.create(paste0(rootdir, "jordan/kofamscan/tmpdirs/"))
+dir.create(paste0(rootdir, "jordan/gtdb/"))
+dir.create(paste0(rootdir, "jordan/checkm/"))
+
+```
+
+### move copies of jordans bins into her combined folder
+```{r define jordan's binlist}
+#in commandline
+## cp hybrid_bins/*.fa jordan/all_bins/
+## cp nanopore_bins/*.fa jordan/all_bins/
+
+jordan_binlist = gsub(".fa", "", list.files(path = paste0(rootdir, "jordan/all_bins/")))
+length(jordan_binlist)
+```
+
+### checkM
+```{r generate checkM command}
+sink(paste(rootdir, "sh_scripts/checkM.sh", sep = ""))
+  cat("sbatch -J checkM -c 20 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'checkm lineage_wf -t 20 --pplacer_threads 20 -x fa --tab_table ", rootdir, "jordan/all_bins/ ", rootdir, "jordan/checkm/'", "\n", sep = "")
+sink()
+
+file.show(paste(rootdir, "sh_scripts/checkM.sh", sep = ""))
+```
+
+```{r generate checkM qa command}
+sink(paste(rootdir, "sh_scripts/checkM_qa.sh", sep = ""))
+  cat("sbatch -J checkM_qa -c 20 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'checkm qa -t 20 -o 1 -f ", rootdir, "jordan/checkm/checkm_output.txt --tab_table ", rootdir, "jordan/checkm/lineage.ms ", rootdir, "jordan/checkm/'", "\n", sep = "")
+
+sink()
+
+file.show(paste(rootdir, "sh_scripts/checkM_qa.sh", sep = ""))
+```
+
+```{r make genome information csv, message=FALSE, warning=FALSE}
+checkM_info = read_tsv(paste(rootdir, "jordan/checkm/checkm_output.txt", sep = ""), col_names = TRUE)
+checkM_info = rename(checkM_info, contamination = Contamination)
+checkM_info = rename(checkM_info, completeness = Completeness)
+checkM_info = rename(checkM_info, genome = 'Bin Id')
+checkM_info = select(checkM_info, c("genome", "completeness", "contamination"))
+write.csv(checkM_info, paste0(rootdir, "jordan/checkm/checkm_qa.csv"), row.names = FALSE)
+```
+
+### GTDB-Tk
+```{r generate GTDB-Tk command}
+#switch base to base_metagenomics conda env
+sink(paste(rootdir, "sh_scripts/jordan_gtdbtk.sh", sep = ""))
+  cat("sbatch -J gtdbtk -c 32 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'gtdbtk classify_wf --genome_dir ", rootdir, "jordan/all_bins/ --out_dir ", rootdir, "jordan/gtdb/ -x fa --cpus 32 --skip_ani_screen'", "\n", sep = "")
+sink()
+
+file.show(paste(rootdir, "sh_scripts/jordan_gtdbtk.sh", sep = ""))
+```
+
+```{r parse GTDB-Tk output, make genome summary}
+gtdb_bac_info = read_tsv(paste(rootdir, "jordan/gtdb/gtdbtk.bac120.summary.tsv", sep = ""))
+gtdb_arc_info = read_tsv(paste(rootdir, "jordan/gtdb/gtdbtk.ar53.summary.tsv", sep = ""))
+gtdb_info = rbind(gtdb_bac_info, gtdb_arc_info) %>% 
+  select(user_genome, classification) %>% 
+  rename("genome" = "user_genome")
+
+genome_info = merge(checkM_info, gtdb_info, by = "genome")
+
+write.csv(genome_info, paste0(rootdir, "/jordan_genome_info_summary.csv"), row.names = FALSE)
+
+genome_info <- genome_info %>%
+  mutate(
+    phylum = sub(".*p__", "", sub("\\;c.*", "", classification)),
+    class = sub(".*c__", "", sub("\\;o.*", "", classification)),
+    label = paste(phylum, class, sep = "\n"),
+    kingdom = sub(".*d__", "", sub("\\;p.*", "", classification))
+  )
+
+length(unique(genome_info$phylum))
+sum(grepl("Archaea", genome_info$kingdom))
+sum(grepl("Bacteria", genome_info$kingdom))
+```
+
+### call genes with prodigal
+```{r generate kofamparse commands}
+commands = vector("character", length(jordan_binlist)) 
+
+fna_out = paste0(rootdir, "jordan/prodigal/fna")
+faa_out = paste0(rootdir, "jordan/prodigal/faa")
+log_out = paste0(rootdir, "jordan/prodigal/log")
+bin_dir = paste0(rootdir, "jordan/all_bins")
+
+commands <- sapply(jordan_binlist, function(i) {
+
+  cmd <- sprintf(
+    "prodigal -i %s/%s.fa -d %s/%s_ORFs.fna -a %s/%s_ORfs.faa -o %s/%s.log",
+    bin_dir, i, fna_out, i, faa_out, i, log_out, i
+  )
+  
+  return(cmd)
+})
+
+# Number of commands per file
+num_files <- 15
+commands_per_file <- ceiling(length(commands) / num_files)
+
+# Write commands to files
+for (i in seq_len(num_files)) {
+  start <- (i - 1) * commands_per_file + 1
+  end <- min(i * commands_per_file, length(commands))
+  subset_commands <- commands[start:end]
+  file_name <- sprintf("prodigal_commands_part_%02d.sh", i)
+  writeLines(subset_commands, paste0(rootdir, "/sh_scripts/", file_name))
+}
+
+#wrap the commands to sbatch them
+integer_list = 1:15
+
+kofam_commands <- vector("character", length(integer_list))
+
+for (i in integer_list) {
+    formatted_i <- sprintf("%02d", i)
+    kofam_commands[i] <- paste("sbatch -J prodigal", formatted_i, " -c 20 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap '", rootdir, "sh_scripts/prodigal_commands_part_", formatted_i, ".sh'", sep = "")
+}
+
+# Write all commands to a single file
+writeLines(kofam_commands, paste0(rootdir, "sh_scripts/all_prodigal_commands.sh"))
+```
+
+### kofamscan
+```{r generate kofamscan commands}
+#remember to activate kofamscan conda environment
+#ml ruby
+
+commands <- vector("character", length(jordan_binlist)) 
+
+kofam_exec <- "/home/groups/dekas/rebecca/kofamscan/kofam_scan-1.3.0/exec_annotation"
+ko_list <- "/home/groups/dekas/rebecca/kofamscan/ko_list"
+profiles <- "/home/groups/dekas/rebecca/kofamscan/profiles"
+faa_path <- "/scratch/users/rsalcedo/orca_allbins/jordan/prodigal/faa"
+output_path <- "/scratch/users/rsalcedo/orca_allbins/jordan/kofamscan/txt"
+tmpdir_base <- "/scratch/users/rsalcedo/orca_allbins/jordan/kofamscan/tmpdirs"
+threads <- 32
+
+commands <- sapply(jordan_binlist, function(i) {
+  tmpdir <- sprintf("%s/%s_tmpdir/", tmpdir_base, i)
+  
+  cmd <- sprintf(
+    "%s -o %s/%s_keggIDs.txt -k %s -p %s --cpu %d --tmp-dir %s %s/%s_ORFs.faa",
+    kofam_exec, output_path, i, ko_list, profiles, threads, tmpdir, faa_path, i
+  )
+  
+  return(cmd)
+})
+
+# Number of commands per file
+num_files <- 15
+commands_per_file <- ceiling(length(commands) / num_files)
+
+# Write commands to files
+for (i in seq_len(num_files)) {
+  start <- (i - 1) * commands_per_file + 1
+  end <- min(i * commands_per_file, length(commands))
+  subset_commands <- commands[start:end]
+  file_name <- sprintf("kofam_commands_part_%02d.sh", i)
+  writeLines(subset_commands, paste0(rootdir, "/sh_scripts/", file_name))
+}
+
+#wrap the commands to sbatch them
+integer_list = 1:15
+
+kofam_commands <- vector("character", length(integer_list))
+
+for (i in integer_list) {
+    formatted_i <- sprintf("%02d", i)
+    kofam_commands[i] <- paste("sbatch -J kofam", formatted_i, " -c 32 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap '", rootdir, "sh_scripts/kofam_commands_part_", formatted_i, ".sh'", sep = "")
+}
+
+# Write all commands to a single file
+writeLines(kofam_commands, paste0(rootdir, "sh_scripts/all_kofam_commands.sh"))
+```
+
+### kofamparse
+```{r generate kofamparse commands}
+commands <- vector("character", length(jordan_binlist)) 
+
+kofamparse_path = "/home/groups/dekas/software/kofamparse/kofamparse"
+txt_path <- "/scratch/users/rsalcedo/orca_allbins/jordan/kofamscan/txt"
+csv_path <- "/scratch/users/rsalcedo/orca_allbins/jordan/kofamscan/csv"
+
+commands <- sapply(jordan_binlist, function(i) {
+
+  cmd <- sprintf(
+    "%s %s/%s_keggIDs.txt %s/%s_keggIDs.csv",
+    kofamparse_path, txt_path, i, csv_path, i
+  )
+  
+  return(cmd)
+})
+
+# Number of commands per file
+num_files <- 15
+commands_per_file <- ceiling(length(commands) / num_files)
+
+# Write commands to files
+for (i in seq_len(num_files)) {
+  start <- (i - 1) * commands_per_file + 1
+  end <- min(i * commands_per_file, length(commands))
+  subset_commands <- commands[start:end]
+  file_name <- sprintf("koparse_commands_part_%02d.sh", i)
+  writeLines(subset_commands, paste0(rootdir, "/sh_scripts/", file_name))
+}
+
+#wrap the commands to sbatch them
+integer_list = 1:15
+
+kofam_commands <- vector("character", length(integer_list))
+
+for (i in integer_list) {
+    formatted_i <- sprintf("%02d", i)
+    kofam_commands[i] <- paste("sbatch -J kofam", formatted_i, " -c 1 --mem-per-cpu 2G -p serc -t 160:00:00 --wrap '", rootdir, "sh_scripts/koparse_commands_part_", formatted_i, ".sh'", sep = "")
+}
+
+# Write all commands to a single file
+writeLines(kofam_commands, paste0(rootdir, "sh_scripts/all_koparse_commands.sh"))
+```
+
+### kofamscan thresholding
+```{r kofamscan thresholding, message=FALSE, warning=FALSE}
+for(i in jordan_binlist) {                                           
+  kegg = read_csv(paste(rootdir, "jordan/kofamscan/csv/", i, "_keggIDs.csv", sep = ""), col_names = TRUE)
+  kegg$score = as.integer(kegg$score)
+  kegg$threshold = as.integer(kegg$threshold)
+  kegg = rename(kegg, gene = "Gene name") 
+  kegg = rename(kegg, KO = "KO number") 
+  kegg = rename(kegg, evalue = "e-value") 
+  kegg_besthit = kegg %>% 
+    group_by(gene) %>% 
+    slice_max(score)
+  kegg_besthit = subset(kegg_besthit, kegg_besthit$evalue < 1e-6)
+  kegg_besthit = subset(kegg_besthit, kegg_besthit$score >= 0.8*threshold)
+  write.csv(kegg_besthit, file = paste0(rootdir, "jordan/kofamscan/csv_processed/", i, "_processed.csv"))
+}
+```
+
+#dRep
+```{r create drep output directory}
+dir.create(paste0(rootdir, "/drep/"))
+dir.create(paste0(rootdir, "/sh_scripts/"))
+```
+
+```{r generate drep commmand}
+#remember to activate drep conda env
+#ml python/3.6.1
+sink(paste(rootdir, "sh_scripts/dRep.sh", sep = ""))
+cat("sbatch -J dRep -c 48 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'dRep dereplicate ", rootdir, "drep/ -g ", genomedir, "*.fa -sa 0.95 -comp 50 -con 25 -d -p 48'\n", sep = "")
+sink()
+
+file.show(paste(rootdir, "sh_scripts/dRep.sh", sep = ""))
+system("chmod +x /scratch/users/rsalcedo/orca_RSG/sh_scripts/dRep.sh")
+```
+
+```{r make drep binlist}
+drepdir = paste0(rootdir, "drep/dereplicated_genomes/")
+drep_binlist = gsub(".fa", "", list.files(path = drepdir))
+length(drep_binlist)
+#412
+
+sink(paste(rootdir, "drepbinlist.txt", sep = ""))
+writeLines(unlist(lapply(drep_binlist, paste, collapse=" ")))
+sink()
+```
+
+## integrate drep set's annotations into correct folder
+did a whole lot of cp commands to move the processed kofamscan annotations, the prodigal fna, and prodigal faa files from their respective folders into a merged folder within rootdir (orca_allbins). Now those directories have 661 files (46 from all RSG, 216 from all jordan, and 399 from drep JGI). 
+
+```{r make merged genome summary}
+JGI_genome_info = read.csv("/scratch/users/rsalcedo/orca_JGI/nr_genome_info_summary.csv")
+JGI_genome_info$dataset = "JGI"
+
+RSG_genome_info = read.csv(paste0(rootdir, "/RSG_genome_info_summary.csv"))
+RSG_genome_info$drep_rep = NULL
+RSG_genome_info$primary_cluster = NULL
+RSG_genome_info$secondary_cluster = NULL
+RSG_genome_info$X = NULL
+RSG_genome_info$dataset = "06242024 sequencing run"
+
+jordan_genome_info = read.csv(paste0(rootdir, "/jordan_genome_info_summary.csv"))
+jordan_genome_info$dataset = "jordan long read"
+
+merged_genome_info = rbind(jordan_genome_info, JGI_genome_info, RSG_genome_info)
+```
+
+```{r combine merged genome info csv with drep information}
+cdb = read.csv(paste0(rootdir,"drep/data_tables/Cdb.csv"))
+drep_info = select(cdb, genome, primary_cluster, secondary_cluster)
+drep_info$genome = gsub(".fa", "", drep_info$genome)
+
+merged_genome_info <- merge(drep_info, merged_genome_info, all.y = TRUE, by = "genome")
+merged_genome_info <- merged_genome_info %>%
+  mutate(drep_rep = ifelse(genome %in% drep_binlist, TRUE, FALSE))
+
+write.csv(merged_genome_info, file = paste0(rootdir, "/merged_genomeset_info.csv"))
+```
+
+# identify annotation files corresponding to drep reps and copy
+```{r select annotation files corresponding to drep reps}
+# Define the source directories
+source_dirs <- c("/scratch/users/rsalcedo/orca_allbins/merged_kofamscan_processed/", "/scratch/users/rsalcedo/orca_allbins/merged_prodigal_faa/", "/scratch/users/rsalcedo/orca_allbins/merged_prodigal_fna/")
+
+# Define the destination directory
+dest_dir <- "/scratch/users/rsalcedo/orca_allbins/drep_annotations/"
+
+# Create the destination directory if it doesn't exist
+if (!dir.exists(dest_dir)) {
+  dir.create(dest_dir, recursive = TRUE)
+}
+
+# Loop through each source directory
+for (dir in source_dirs) {
+  # List all files in the directory
+  files <- list.files(dir, full.names = TRUE)
+  
+  # Filter files that match any sample name with varying suffixes
+  matched_files <- files[sapply(files, function(file) {
+    any(sapply(drep_binlist, function(sample) grepl(paste0("^", sample, "_.*"), basename(file))))
+  })]
+  
+  # Copy matched files to the destination directory
+  for (file in matched_files) {
+    file.copy(file, dest_dir, overwrite = TRUE)
+  }
+}
+```

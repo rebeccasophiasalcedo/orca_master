@@ -1,0 +1,642 @@
+---
+title: "orca basin processing"
+output: html_document
+date: "2024-12-17"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# environment setup
+```{r load libraries}
+library(tidyr)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(data.table)
+library(plyr)
+library(stringr)
+library(knitr)
+```
+
+```{r set root directory}
+oak = "/oak/stanford/groups/dekas/sequences/OAST/orca_basin2023/JGI_MGMT_2024/Raw_Data/fastq/"
+rootdir = "/scratch/users/rsalcedo/orca_JGI/"
+```
+
+```{r create read directories}
+dir.create(paste0(rootdir, "reads/"))
+dir.create(paste0(rootdir, "reads/trimmed_reads/"))
+dir.create(paste0(rootdir, "reads/raw_reads/"))
+dir.create(paste0(rootdir, "/sh_scripts/"))
+```
+## File management
+```{r copy and rename reads}
+script = "/home/users/rsalcedo/r_scripts/orca/JGI/file_transfer.R"
+
+#system("ml R/4.2.0")
+
+sink(paste(rootdir, "file_transfer.sh", sep = ""))
+  cat("sbatch -J file_transfer -c 20 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'Rscript ", script, "'\n", sep = "")
+sink()
+```
+
+# Separate forward and Reverse Reads
+```{r split interleaved reads into forward and reverse}
+files = list.files(paste0(rootdir, "reads/raw_interleaved_reads"), pattern = "fastq.gz$", full.names = TRUE)
+
+sample_list = sub("\\..*$", "", files)
+sample_list = sub("/scratch/users/rsalcedo/orca_JGI/reads/raw_interleaved_reads/", "", sample_list)
+
+sink(paste0(rootdir, "/sample_list.txt"))
+cat(sample_list, sep = "\n")
+sink()
+
+sink(paste(rootdir, "sh_scripts/bbtools_reformat.sh", sep = ""))
+for (i in sample_list)
+  cat("sbatch -J splitreads -c 20 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'reformat.sh in=", rootdir, "reads/raw_interleaved_reads/", i, ".fastq.gz out1=", rootdir, "reads/raw_reads/", i, "_R1.fastq.gz out2=", rootdir, "reads/raw_reads/", i, "_R2.fastq.gz'\n", sep = "")
+sink()
+```
+
+#Quality control
+```{r create directories and load modules}
+#system("ml fastqc/0.11.8")
+#system("ml biology")
+
+dir.create(paste0(rootdir, "/raw_fastqc/"))
+dir.create(paste0(rootdir, "/trimmed_fastqc/"))
+
+readdir = paste0(rootdir, "reads/raw_reads/")
+```
+
+##Preliminary FastQC
+```{r raw read fastqc}
+sink(paste0(rootdir, "sh_scripts/raw_fastQC.sh"))
+for (i in sample_list) {
+  cat("sbatch -J fastQC_", i, " -c 20 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'fastqc ", readdir, i, "_R1.fastq.gz ", readdir, i, "_R2.fastq.gz -o ", rootdir, "raw_fastqc/'", "\n", sep = "")
+  }
+sink()
+
+file.show(paste(rootdir, "sh_scripts/raw_fastQC.sh", sep = ""))
+```
+##bbduk
+```{r trim with bbduk}
+#system("ml java/1.8.0_131")
+
+sink(paste0(rootdir, "sh_scripts/bbduk_commands.sh"))
+for (i in sample_list) {
+  cat("sbatch -J bbduk_", i, " -c 20 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'bbduk.sh in1=", readdir, i, "_R1.fastq.gz in2=", readdir, i, "_R2.fastq.gz out1=", rootdir, "reads/trimmed_reads/", i, "_R1_trimmed.fastq out2=", rootdir, "reads/trimmed_reads/", i, "_R2_trimmed.fastq ref=adapters ktrim=r k=23 mink=11 hdist=1 tbo qtrim=r trimq=25 minlen=30'", "\n", sep = "")
+  }
+sink()
+
+file.show(paste(rootdir, "sh_scripts/bbduk_commands.sh", sep = ""))
+```
+## trimmed fastQC
+```{r trimmed fastqc}
+sink(paste0(rootdir, "sh_scripts/trimmed_fastQC.sh"))
+for (i in sample_list) {
+  cat("sbatch -J fastQC_", i, " -c 20 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'fastqc ", rootdir, "reads/trimmed_reads/", i, "_R1_trimmed.fastq ", rootdir, "reads/trimmed_reads/", i, "_R2_trimmed.fastq -o ", rootdir, "reads/trimmed_fastqc/'", "\n", sep = "")
+  }
+sink()
+
+file.show(paste(rootdir, "sh_scripts/trimmed_fastQC.sh", sep = ""))
+```
+
+## get total number of reads in each trimmed file
+```{r}
+# Define the directory containing your FASTQ files
+fastq_dir <- paste0(rootdir, "reads/trimmed_reads/")
+
+# Function to count the number of reads in a FASTQ file using wc -l
+count_reads <- function(file) {
+  n_lines <- as.numeric(system(paste("wc -l < ", shQuote(file)), intern = TRUE))
+  n_reads <- n_lines / 4  # Each read in a FASTQ file consists of 4 lines
+  return(n_reads)
+}
+
+# List all FASTQ files in the directory
+fastq_files <- list.files(fastq_dir, pattern = "_trimmed.fastq$", full.names = TRUE)
+
+# Initialize vectors to store results
+sample_names <- character(length(fastq_files))
+file_names <- character(length(fastq_files))
+n_reads <- numeric(length(fastq_files))
+
+# Loop through each file, count the reads, and store the results in vectors
+for (i in seq_along(fastq_files)) {
+  file <- fastq_files[i]
+  file_names[i] <- basename(file)
+  sample_names[i] <- gsub("_trimmed.fastq$", "", file_names[i])
+  n_reads[i] <- count_reads(file)
+}
+
+# Create the dataframe
+df <- data.frame(file_name = sample_names, file = file_names, n_reads = n_reads, stringsAsFactors = FALSE)
+
+# Display the resulting dataframe
+print(df)
+
+# Modify the dataframe
+read_df <- df %>%
+  mutate(
+    direction = ifelse(grepl("_R1", file_name), "R1", "R2"),     # Extract "R1" or "R2" into the "direction" column
+    file_name = gsub("_(R1|R2)$", "", file_name)                     # Remove "_R1" or "_R2" from the "sample" column
+  )
+
+# Display the modified dataframe
+print(read_df)
+
+dir.create(paste0(rootdir, "/r_output/"))
+write.csv(read_df, paste0(rootdir, "/r_output/reads_df.csv"))
+
+```
+
+# assemble
+```{r create directory}
+dir.create(paste0(rootdir, "/megahit/"))
+```
+## megahit commands
+```{r megahit command}
+sink(paste0(rootdir, "sh_scripts/megahit_assembly.sh"))
+for (i in sample_list) {
+  cat("sbatch -J megahit_", i, " -c 20 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'megahit -1 ", rootdir, "reads/trimmed_reads/", i, "_R1_trimmed.fastq -2 ", rootdir, "reads/trimmed_reads/", i, "_R2_trimmed.fastq -o ", rootdir, "megahit/", i, "/ --out-prefix ", i, " -t 20 --min-contig-len 1500 --presets meta-sensitive'", "\n", sep = "")
+}
+sink()
+file.show(paste0(rootdir, "sh_scripts/megahit_assembly.sh"))
+
+```
+## file management
+```{r copy all assemblies into one directory}
+# Define the path to the main directory
+main_dir <- "/scratch/users/rsalcedo/orca_JGI/megahit"
+
+# Create the new "contigs" directory if it doesn't exist
+dir.create(paste0(rootdir, "/megahit/contigs/"))
+
+contigs_dir = paste0(rootdir, "/megahit/contigs/")
+
+# List all subdirectories
+subdirs <- list.dirs(main_dir, recursive = FALSE, full.names = TRUE)
+
+# Loop through each subdirectory and copy the ".contigs.fa" file to the "contigs" directory
+for (subdir in subdirs) {
+  # Find the .contigs.fa file
+  contigs_file <- list.files(subdir, pattern = "\\.contigs\\.fa$", full.names = TRUE)
+  
+  # If the file exists, copy it to the "contigs" directory
+  if (length(contigs_file) == 1) {
+    file.copy(contigs_file, contigs_dir)
+  }
+}
+```
+## assembly statistics
+```{r stats command}
+dir.create(paste0(rootdir, "megahit/assembly_stats/"))
+
+sink(paste0(rootdir, "sh_scripts/bbtool_stats.sh"))
+for (i in sample_list) {
+  cat("sbatch -J stats_", i, " -c 20 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'stats.sh in=", rootdir, "megahit/contigs/", i, ".contigs.fa out=", rootdir, "megahit/assembly_stats/", i, ".stats.tsv format=3'", "\n", sep = "")
+}
+sink()
+file.show(paste0(rootdir, "sh_scripts/bbtool_stats.sh"))
+```
+
+```{r stats parsing}
+# Set the path to your directory containing the TSV files
+directory_path <- paste0(rootdir, "megahit/assembly_stats/")
+
+# List all the TSV files in the directory
+file_list <- list.files(directory_path, pattern = "\\.tsv$", full.names = TRUE)
+
+# Function to read a TSV file and add file name as a column
+read_tsv_file <- function(file) {
+  df <- read_tsv(file)
+  df$file_name <- sub("\\.stats\\.tsv$", "", basename(file))  # Remove ".tsv" extension
+  df <- df %>% select(file_name, everything())       # Make file_name the first column
+  return(df)
+}
+
+# Read and bind all files
+stats_df <- bind_rows(lapply(file_list, read_tsv_file))
+
+write.csv(stats_df, paste0(rootdir, "r_output/assembly_stats_summary.csv"), row.names = FALSE)
+```
+
+# Determine percentage of reads mapping to assemblies
+```{r create directories}
+dir.create(paste0(rootdir, "/assembly_analysis/"))
+dir.create(paste0(rootdir, "/assembly_analysis/bowtie/"))
+dir.create(paste0(rootdir, "/assembly_analysis/bowtie/indexes/"))
+dir.create(paste0(rootdir, "/assembly_analysis/bowtie/sams/"))
+dir.create(paste0(rootdir, "/assembly_analysis/bowtie/bams/"))
+dir.create(paste0(rootdir, "/assembly_analysis/bowtie/logs/"))
+```
+## mapping with bowtie
+```{r build bowtie indexes}
+#system("conda activate base_metagenomics")
+
+sink(paste0(rootdir, "/sh_scripts/assembly_bowtie_build.sh"))
+for (i in sample_list) {
+  cat("sbatch -J ", i, "_build -c 20 --mem-per-cpu 4G -p serc -t 160:00:00 --wrap 'bowtie2-build ", rootdir, "megahit/contigs/", i, ".contigs.fa ", rootdir, "assembly_analysis/bowtie/indexes/", i, "_contigs'\n", sep = "")
+  }
+sink()
+file.show(paste0(rootdir, "sh_scripts/assembly_bowtie_build.sh"))
+```
+
+```{r map reads to contigs}
+seqdir = paste0(rootdir, "reads/trimmed_reads/")
+
+sink(paste0(rootdir, "sh_scripts/assembly_bowtie_map.sh"))
+for (i in sample_list) {
+  cat("sbatch -J ", i, "_map -c 20 --mem-per-cpu 4G -p serc -t 160:00:00 --wrap 'bowtie2 -x ", rootdir, "assembly_analysis/bowtie/indexes/", i, "_contigs -1 ", seqdir, i, "_R1_trimmed.fastq -2 ", seqdir, i, "_R2_trimmed.fastq -S ", rootdir, "assembly_analysis/bowtie/sams/", i, "_reads_to_contigs.sam --no-unal -p 20'\n", sep = "")
+}
+sink()
+file.show(paste0(rootdir, "sh_scripts/assembly_bowtie_map.sh"))
+
+#system("chmod +x /scratch/users/rsalcedo/orca_RSG/sh_scripts/bowtie_map.sh")
+```
+## samtools processing
+```{r convert sam to bam}
+sink(paste0(rootdir, "sh_scripts/assembly_bowtie_sort.sh"))
+for (i in sample_list) {
+  cat("sbatch -J ", i, "_sort -c 20 --mem-per-cpu 4G -p serc -t 160:00:00 --wrap 'samtools sort ", rootdir, "assembly_analysis/bowtie/sams/", i, "_reads_to_contigs.sam -@ 20 -o ", rootdir, "assembly_analysis/bowtie/bams/", i, "_reads_to_contigs_sorted.bam'\n", sep = "")
+}
+sink()
+file.show(paste0(rootdir, "sh_scripts/assembly_bowtie_sort.sh"))
+
+system("chmod +x /scratch/users/rsalcedo/orca_RSG/sh_scripts/assembly_bowtie_sort.sh")
+```
+
+```{r index bam file}
+sink(paste0(rootdir, "sh_scripts/assembly_bowtie_index.sh"))
+for (i in sample_list) {
+  cat("sbatch -J ", i, "_index -c 20 --mem-per-cpu 4G -p serc -t 160:00:00 --wrap 'samtools index ", rootdir, "assembly_analysis/bowtie/bams/", i, "_reads_to_contigs_sorted.bam -@ 20'\n", sep = "")
+}
+sink()
+file.show(paste0(rootdir, "sh_scripts/assembly_bowtie_index.sh"))
+
+system("chmod +x /scratch/users/rsalcedo/orca_RSG/sh_scripts/assembly_bowtie_index.sh")
+```
+
+```{r samtool view commands}
+dir.create(paste0(rootdir, "assembly_analysis/bowtie/read_mapping/"))
+#dir.create(paste0(rootdir, "assembly_analysis/bowtie/read_mapping/total/"))
+dir.create(paste0(rootdir, "assembly_analysis/bowtie/read_mapping/mapped/"))
+
+# get total number of reads
+#sink(paste0(rootdir, "sh_scripts/assembly_samtools_total.sh"))
+#for (i in sample_list) {
+#  cat("sbatch -J ", i, "_view -c 20 --mem-per-cpu 4G -p serc -t 160:00:00 --wrap 'samtools view -c ", rootdir, "assembly_analysis/bowtie/bams/", i, "_reads_to_contigs_sorted.bam -@ 20 --output ", rootdir, "assembly_analysis/bowtie/read_mapping/total/", i,"_total.txt'\n", sep = "")
+#}
+#sink()
+#file.show(paste0(rootdir, "sh_scripts/assembly_samtools_total.sh"))
+
+#get mapped reads
+sink(paste0(rootdir, "sh_scripts/assembly_samtools_mapped.sh"))
+for (i in sample_list) {
+  cat("sbatch -J ", i, "_view -c 20 --mem-per-cpu 4G -p serc -t 160:00:00 --wrap 'samtools view -c -F 4 ", rootdir, "assembly_analysis/bowtie/bams/", i, "_reads_to_contigs_sorted.bam -@ 20 --output ", rootdir, "assembly_analysis/bowtie/read_mapping/mapped/", i,"_mapped.txt'\n", sep = "")
+}
+sink()
+file.show(paste0(rootdir, "sh_scripts/assembly_samtools_mapped.sh"))
+```
+## calculation and plotting
+```{r calculate percentage of mapped reads}
+# Define folder paths
+#total_folder <- paste0(rootdir, "assembly_analysis/bowtie/read_mapping/total/")
+mapped_folder <- paste0(rootdir, "assembly_analysis/bowtie/read_mapping/mapped/")
+
+# Get list of files in each folder
+#total_files <- list.files(total_folder, pattern = "_total\\.txt$", full.names = TRUE)
+mapped_files <- list.files(mapped_folder, pattern = "_mapped\\.txt$", full.names = TRUE)
+
+# Extract sample names
+get_sample_name <- function(filepath, suffix) {
+  basename(filepath) %>%
+    sub(suffix, "", .)
+}
+
+#total_sample_names <- sapply(total_files, get_sample_name, "_total.txt")
+mapped_sample_names <- sapply(mapped_files, get_sample_name, "_mapped.txt")
+
+# Check that sample names match between folders
+#if (!all(sort(total_sample_names) == sort(mapped_sample_names))) {
+#  stop("Sample names in the total and mapped folders do not match!")
+#}
+
+# Read the files into dataframes
+read_value <- function(filepath) {
+  as.numeric(readLines(filepath))
+}
+
+#total_values <- sapply(total_files, read_value)
+mapped_values <- sapply(mapped_files, read_value)
+
+# Create the final dataframe
+final_df <- data.frame(
+  file_name = total_sample_names,
+#  total = total_values,
+  mapped = mapped_values,
+  stringsAsFactors = FALSE
+)
+
+# Calculate percentage mapped
+#final_df$percentage_mapped <- (final_df$mapped / final_df$total) * 100
+
+# Print the result
+print(final_df)
+
+df = merge(final_df, reads_df, by = "file_name", all.y = TRUE) %>% select(file_name, n_reads, mapped) %>% distinct(file_name, .keep_all = TRUE)
+
+df$individal_reads = df$n_reads*2
+
+df$percentage_mapped = df$mapped/df$individal_reads
+
+```
+
+```{r coverm commands}
+coverm_commands <- vector("character") 
+
+for (i in sample_list) {
+  coverm_commands[i] = paste("coverm contig -t 20 -b ", rootdir, "assembly_analysis/bowtie/bams/", i, "_reads_to_contigs_sorted.bam --min-covered-fraction 0 --output-format sparse -m count mean covered_fraction length > ", rootdir, "assembly_analysis/bowtie/read_mapping/", i, "_coverm.csv", sep = "")
+}
+
+writeLines(coverm_commands, paste0(rootdir, "sh_scripts/assembly_coverm.sh"))
+
+file.show(paste0(rootdir, "sh_scripts/assembly_coverm.sh"))
+```
+
+```{r coverm parsing}
+setwd(paste0(rootdir, "/assembly_analysis/bowtie/read_mapping/coverm"))
+
+# List all CSV files in the directory
+csv_files <- list.files(pattern = "\\.csv$")
+
+# Function to process each CSV file
+process_file <- function(file) {
+  # Read the CSV file
+  data <- read_tsv(file)
+  
+  # Replace spaces in column names with underscores
+  colnames(data) <- gsub(" ", "_", colnames(data))
+  
+  # Sum the read count column by sample
+  aggregated <- aggregate(Read_Count ~ Sample, data = data, sum)
+  
+  # Return the aggregated data
+  return(aggregated)
+}
+
+# Apply the function to all CSV files and combine results
+all_data <- do.call(rbind, lapply(csv_files, process_file))
+
+# Rename columns for clarity
+colnames(all_data) <- c("file_name", "mapped_reads")
+
+all_data$file_name = gsub("_reads_to_contigs_sorted", "", all_data$file_name)
+
+df = merge(all_data, reads_df, by = "file_name", all.y = TRUE) %>% select(file_name, n_reads, mapped_reads) %>% distinct(file_name, .keep_all = TRUE)
+
+df$individal_reads = df$n_reads*2
+
+df$percentage_mapped = df$mapped_reads/df$individal_reads
+
+summary(df$percentage_mapped)
+```
+
+```{r plot read mapping}
+df <- df %>%
+  mutate(file_name = factor(file_name, levels = file_name[order(percentage_mapped)]))
+
+# Plot the data
+ggplot(data = df) +
+  geom_point(aes(x = file_name, y = percentage_mapped * 100)) +
+  labs(
+    x = "File Name",
+    y = "Percentage Mapped (%)",
+    title = "Percentage Mapped by File"
+  ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+```{r compare read mapping against other assembly metrics}
+df2 = merge(df, assembly_stats_summary)
+
+# Plot the data
+ggplot(data = df2) +
+  geom_point(aes(x = file_name, y = percentage_mapped * 100), color = "lightblue", size = 3) +
+  geom_point(aes(x = file_name, y = individal_reads / 1e6), color = "darkgreen", size = 3) +  
+  scale_y_continuous(
+    name = "percentage of reads mapped",
+    sec.axis = sec_axis(~ . * 1e6, name = "individual read count")
+  ) +
+  labs(
+    x = "sample",
+    title = "Comparison of % of reads mapped to individual read count "
+  ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        axis.title.y = element_text(color = "lightblue"),
+        axis.title.y.right = element_text(color = "darkgreen"))
+
+ggplot(data = df2) +
+  geom_point(aes(x = file_name, y = percentage_mapped * 100), color = "lightblue", size = 3) +
+  geom_point(aes(x = file_name, y = contig_bp / 1e6), color = "mediumpurple1", size = 3) +  
+  scale_y_continuous(
+    name = "percentage of reads mapped",
+    sec.axis = sec_axis(~ . * 1e6, name = "contig bp")
+  ) +
+  labs(
+    x = "sample",
+    title = "Comparison of % of reads mapped to contig bp "
+  ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+```{r scatter plots}
+ggplot(data = df2) +
+  geom_point(aes(x = individal_reads/1e8, y = percentage_mapped * 100), color = "lightblue3", size = 3) +
+  labs(
+    x = "individual reads x (1e8)",
+    y = "percentage of reads mapped", 
+    title = "Comparison of % of reads mapped to individual read count "
+  ) +
+  theme_bw()
+
+ggplot(data = df2) +
+  geom_point(aes(x = contig_bp/1e8, y = percentage_mapped * 100), color = "darkgreen", size = 3) +
+  labs(
+    x = "contig bp x (1e8)",
+    y = "percentage of reads mapped", 
+    title = "Comparison of % of reads mapped to assembly size (contig bp) "
+  ) +
+  theme_bw()
+
+ggplot(data = df2) +
+  geom_point(aes(x = ctg_N50, y = percentage_mapped * 100), color = "darkorange", size = 3) +
+  labs(
+    x = "contig N50",
+    y = "percentage of reads mapped", 
+    title = "Comparison of % of reads mapped to assembly contig N50 "
+  ) +
+  theme_bw()
+
+ggplot(data = df2) +
+  geom_point(aes(x = ctg_N50, y = contig_bp/1e8), color = "pink4", size = 3) +
+  labs(
+    x = "contig N50",
+    y = "contig_bp (1e8)", 
+    title = "Comparison of contig_bp (e8) to assembly contig N50 "
+  ) +
+  theme_bw()
+
+```
+# calculate read depth of each sample
+```{r define R function}
+calculate_depth_paired <- function(r1_file, r2_file) {
+    # Helper function to calculate the total bases in a single gzipped FASTQ file
+    calculate_total_bases <- function(file) {
+        con <- gzfile(file, "r")  # Open gzipped file
+        total_bases <- 0
+        line_num <- 0
+        
+        while (TRUE) {
+            line <- readLines(con, n = 1)
+            if (length(line) == 0) break  # End of file
+            line_num <- line_num + 1
+            
+            # Sequence lines are every 4th line starting from the 2nd
+            if (line_num %% 4 == 2) {
+                total_bases <- total_bases + nchar(line)
+            }
+        }
+        close(con)
+        return(total_bases)
+    }
+    
+    # Calculate total bases for both files
+    total_bases_r1 <- calculate_total_bases(r1_file)
+    total_bases_r2 <- calculate_total_bases(r2_file)
+    
+    # Total bases and depth in Gbp
+    total_bases <- total_bases_r1 + total_bases_r2
+    depth_gbp <- total_bases / 1e9
+    
+    return(data.frame(
+        Sample = gsub("_R[12].fastq.gz$", "", basename(r1_file)),
+        Total_Bases = total_bases,
+        Depth_Gbp = depth_gbp
+    ))
+}
+
+
+```
+
+```{r process files}
+# Specify the directory containing FASTQ files
+fastq_dir <- paste0(rootdir, "reads/raw_reads/")
+fastq_files <- list.files(fastq_dir, pattern = "\\.fastq\\.gz$", full.names = TRUE)
+
+# Match R1 and R2 files
+r1_files <- sort(fastq_files[grepl("_R1.fastq.gz$", fastq_files)])
+r2_files <- sort(fastq_files[grepl("_R2.fastq.gz$", fastq_files)])
+
+if (length(r1_files) != length(r2_files)) {
+    stop("Mismatch in the number of R1 and R2 files!")
+}
+
+# Calculate sequencing depth for each sample
+depth_results <- do.call(rbind, mapply(calculate_depth_paired, r1_files, r2_files, SIMPLIFY = FALSE))
+
+
+```
+
+```{r plot }
+ggplot(depth_results, aes(x = Sample, y = Depth_Gbp)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    theme_minimal() +
+    labs(title = "Sequencing Depth per Sample",
+         x = "Sample",
+         y = "Sequencing Depth (Gbp)") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+# annotate whole assembly
+## prodigal
+```{r prodigal commands}
+sink(paste(rootdir, "sh_scripts/wholeMG_prodigal.sh", sep = ""))
+for (i in in_situ_samples) {
+  cat("sbatch -J ", i, " -c 20 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'prodigal -i ", rootdir, "megahit/contigs/", i, ".contigs.fa -d ", rootdir, "assembly_analysis/wholeMG_prodigal/fna/", i, "_prodigalORFs.fna -a ", rootdir, "assembly_analysis/wholeMG_prodigal/faa/", i, "_prodigalORFs.faa -o ", rootdir, "assembly_analysis/wholeMG_prodigal/log/", i, "_prodigal.log'\n", sep = "")
+  }
+sink()
+
+file.show(paste(rootdir, "sh_scripts/wholeMG_prodigal.sh", sep = ""))
+
+dir.create(paste0(rootdir, "/RSGsorts_prodigal/"))
+dir.create(paste0(rootdir, "/RSGsorts_prodigal/faa/"))
+dir.create(paste0(rootdir, "/RSGsorts_prodigal/fna/"))
+dir.create(paste0(rootdir, "/RSGsorts_prodigal/log/"))
+
+sink(paste(rootdir, "sh_scripts/RSGsorts_prodigal.sh", sep = ""))
+for (i in RSG_sorts) {
+  cat("sbatch -J ", i, " -c 20 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'prodigal -i ", rootdir, "megahit/contigs/", i, ".contigs.fa -d ", rootdir, "assembly_analysis/RSGsorts_prodigal/fna/", i, "_prodigalORFs.fna -a ", rootdir, "assembly_analysis/RSGsorts_prodigal/faa/", i, "_prodigalORFs.faa -o ", rootdir, "assembly_analysis/RSGsorts_prodigal/log/", i, "_prodigal.log'\n", sep = "")
+  }
+sink()
+
+file.show(paste(rootdir, "sh_scripts/RSGsorts_prodigal.sh", sep = ""))
+```
+
+## kofamscan 
+```{r kofamscan commands}
+kofamscan_path = "/home/groups/dekas/rebecca/kofamscan/kofam_scan-1.3.0/exec_annotation"
+ko_list = "/home/groups/dekas/rebecca/kofamscan/ko_list"
+ko_profiles = "/home/groups/dekas/rebecca/kofamscan/profiles"
+
+#remember to ml ruby
+
+sink(paste0(rootdir, "kofamscan.sh"))
+for (i in in_situ_samples) {
+  cat("sbatch -J ", i, "_kofam -c 20 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap '", kofamscan_path, " -o ", rootdir, "wholeMG_kofamscan/txt/", i, "_KEGGIDs.txt -k ", ko_list, " -p ", ko_profiles, " --cpu 20 --tmp-dir ", rootdir, i, "_tmpdir/ ", rootdir, "wholeMG_prodigal/faa/", i, "_prodigalORFs.faa'\n", sep = "")
+  }
+sink()
+
+file.show(paste0(rootdir, "kofamscan.sh"))
+system("chmod +x /scratch/users/rsalcedo/orca_RSG/kofamscan.sh")
+
+#jobID's 51690977 and 51690978
+```
+
+```{r kofamparse commands}
+#remember to activate base_metagenomics conda environment
+
+kofamparse_path = "/home/groups/dekas/software/kofamparse/kofamparse"
+
+sink(paste0(rootdir, "kofamparse.sh"))
+for (i in in_situ_samples) {
+  cat("sbatch -J ", i, "_parse -c 20 --mem-per-cpu 4G -p serc -t 160:00:00 --wrap '", kofamparse_path, " ", rootdir, "wholeMG_kofamscan/txt/", i, "_KEGGIDs.txt ", rootdir, "wholeMG_kofamscan/csv/", i, "_KEGGIDs.csv'\n", sep = "")
+  }
+sink()
+
+file.show(paste0(rootdir, "kofamparse.sh"))
+system("chmod +x /scratch/users/rsalcedo/orca_RSG/kofamparse.sh")
+
+```
+
+```{r process kofamparse message=FALSE, warning=FALSE}
+
+for(i in in_situ_samples) {                                           
+  kegg = read_csv(paste(rootdir, "wholeMG_kofamscan/csv/", i, "_KEGGIDs.csv", sep = ""), col_names = TRUE)
+  kegg$score = as.integer(kegg$score)
+  kegg$threshold = as.integer(kegg$threshold)
+  kegg = rename(kegg, gene = "Gene name") 
+  kegg = rename(kegg, KO = "KO number") 
+  kegg = rename(kegg, evalue = "e-value") 
+  kegg_besthit = kegg %>% 
+    group_by(gene) %>% 
+    slice_max(score)
+  kegg_besthit = subset(kegg_besthit, kegg_besthit$evalue < 1e-6)
+  kegg_besthit = subset(kegg_besthit, kegg_besthit$score >= threshold)
+  write.csv(kegg_besthit, paste(rootdir, "wholeMG_kofamscan/csv_processed/", i, "_KEGGIDs_processed.csv", sep = ""))
+}
+
+```
