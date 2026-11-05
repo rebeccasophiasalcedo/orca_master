@@ -1,0 +1,264 @@
+---
+title: "orca basin JGI project scoping"
+output: html_document
+date: "2024-11-22"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load libraries}
+library(tidyr)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(data.table)
+library(plyr)
+```
+
+```{r set root directory}
+rootdir = "/oak/stanford/groups/dekas/sequences/OAST/orca_basin2023/JGI_MGMT_2024/"
+```
+
+```{r print out existing directory structure}
+setwd(rootdir)
+
+dir_structure = list.files(path = ".", recursive = TRUE, full.names = FALSE)
+
+cat("Directory Structure:\n")
+cat(paste(dir_structure, collapse = "\n"))
+
+writeLines(dir_structure, paste0(oak,"/directory_structure.txt"))
+```
+
+```{r reorganize files by type}
+setwd(rootdir)
+
+files = list.files(path = ".", recursive = TRUE, full.names = TRUE)
+
+root_dir_pattern = "Development_of_metagenomic_and_metatranscriptomic_data_for_the_discovery_of_novel_biogeochemical_processes_in_Orca_Basin__"
+
+# define function for getting sample names our of files
+get_sample_id = function(filepath) {
+  # Split the path into components
+  path_components = strsplit(filepath, "/")[[1]]
+  
+  for (component in path_components) {
+    if (grepl(root_dir_pattern, component)) {
+      sample_id = sub(root_dir_pattern, "", component)
+      return(sample_id)
+    }
+  }
+  
+  return("")
+}
+
+# classify based on file type
+get_analysis_type = function(filepath) {
+  if (grepl("Raw_Data", filepath)) return("Raw_Data")
+  if (grepl("Filtered_Raw_Data", filepath)) return("Filtered_Raw_Data")
+  if (grepl("QC_and_Genome_Assembly", filepath)) return("QC_and_Genome_Assembly")
+  if (grepl("Metagenome_Report_Tables", filepath)) return("Metagenome_Report_Tables")
+  if (grepl("IMG_Data", filepath)) return("IMG_Data")
+  if (grepl(".sh$", filepath)) return("Scripts")
+  return("Other")
+}
+
+log_entries = list()
+
+for (file in files) {
+  sample_id = get_sample_id(file)
+  if (sample_id == "") {
+    next 
+  }
+  #check analysis type and move it into the new directory
+  analysis_type = get_analysis_type(file)
+  dir.create(analysis_type, recursive = TRUE, showWarnings = FALSE)
+  new_filename = paste0(sample_id, "_", basename(file))
+  new_path = file.path(analysis_type, new_filename)
+  file.rename(file, new_path)
+  
+  # log that path names to check that everything went ok
+  log_entries = append(log_entries, list(c(original = file, new = new_path)))
+}
+
+log_df = do.call(rbind.data.frame, log_entries)
+colnames(log_df = c("Original_Path", "New_Path"))
+write.csv(log_df, "file_reorganization_log.csv", row.names = FALSE)
+```
+
+```{r remove old empty directories and further organize}
+dir.create(paste0(rootdir, "Raw_Data/fastq/"))
+dir.create(paste0(rootdir, "Raw_Data/txt/"))
+dir.create(paste0(rootdir, "Raw_Data/sh/"))
+dir.create(paste0(rootdir, "Raw_Data/chaff/"))
+
+dir.create(paste0(rootdir, "QC_and_Genome_Assembly/bams/"))
+dir.create(paste0(rootdir, "QC_and_Genome_Assembly/sams/"))
+dir.create(paste0(rootdir, "QC_and_Genome_Assembly/READMEs/"))
+dir.create(paste0(rootdir, "QC_and_Genome_Assembly/scaffolds/"))
+dir.create(paste0(rootdir, "QC_and_Genome_Assembly/contigs/"))
+
+dir.create(paste0(rootdir, "Metagenome_Report_Tables/Table3/"))
+dir.create(paste0(rootdir, "Metagenome_Report_Tables/Table4/"))
+dir.create(paste0(rootdir, "Metagenome_Report_Tables/Table5/"))
+dir.create(paste0(rootdir, "Metagenome_Report_Tables/Table6/"))
+dir.create(paste0(rootdir, "Metagenome_Report_Tables/Table7/"))
+dir.create(paste0(rootdir, "Metagenome_Report_Tables/Table8/"))
+dir.create(paste0(rootdir, "Metagenome_Report_Tables/Table9/"))
+```
+
+```{r get file size}
+setwd(paste0(rootdir, "/Raw_Data/"))
+
+# get sample ID function
+get_sample_id = function(filename) {
+  sample_id = sub("^(.*?)(?:_\\[.*\\])?$", "\\1", basename(filename))
+  return(sample_id)
+}
+
+# classify based on nucleic acid stated in file name
+get_nucleic_acid_type = function(sample_id) {
+  if (grepl("DNA", sample_id, ignore.case = TRUE)) {
+    return("DNA")
+  } else if (grepl("RNA", sample_id, ignore.case = TRUE)) {
+    return("RNA")
+  } else if (grepl("virome", sample_id, ignore.case = TRUE)) {
+    return("Virome")
+  } else {
+    return("Unknown")
+  }
+}
+
+# calculate file size
+get_file_size_GB = function(filepath) {
+  file_size_bytes = file.info(filepath)$size
+  file_size_GB = file_size_bytes / (1024^3)
+  return(file_size_GB)
+}
+
+raw_data_files = list.files(path = "fastq", recursive = TRUE, full.names = TRUE)
+
+file_info = list()
+
+for (file in raw_data_files) {
+  sample_id = get_sample_id(file)
+  if (sample_id == "") next
+  
+  nucleic_acid_type <- get_nucleic_acid_type(sample_id)
+  file_size_GB = get_file_size_GB(file)
+  file_info = append(file_info, list(c(sample = sample_id, nucleic_acid = nucleic_acid_type, file_size_GB = file_size_GB)))
+}
+
+file_info_df = do.call(rbind.data.frame, file_info)
+colnames(file_info_df) = c("file_name", "Nucleic_Acid", "File_Size_GB")
+
+file_info_df$sample = sub("\\].*", "]", file_info_df$file_name)
+```
+
+```{r summarize library prep tables}
+read_table3_files = function(directory) {
+  files <- list.files(path = directory, pattern = "\\.txt$", full.names = TRUE)
+  data_list <- list()
+  
+  for (file in files) {
+    lines = readLines(file, warn = FALSE)
+      if (length(lines) == 0) next
+    key_value_pairs = lapply(lines, function(line) {
+      parts = strsplit(line, "=", fixed = TRUE)[[1]]
+      if (length(parts) < 2) return(NULL)
+      key = gsub("^assy\\.SIG\\.3\\.", "", parts[1])
+      value = parts[2]
+      return(c(key, value))
+    })
+    
+    key_value_pairs = do.call(rbind, key_value_pairs[!sapply(key_value_pairs, is.null)])
+    named_values = setNames(key_value_pairs[, 2], key_value_pairs[, 1])
+    data_list[[basename(file)]] = named_values
+  }
+  
+  combined_data = rbind.fill(lapply(data_list, function(x) as.data.frame(t(x), stringsAsFactors = FALSE)))
+  rownames(combined_data) = names(data_list)
+  combined_data[] = lapply(combined_data, type.convert, as.is = TRUE)
+  
+  return(combined_data)
+}
+
+directory = paste0(rootdir, "Metagenome_Report_Tables/Table3/")
+table3_data = read_table3_files(directory)
+
+table3_data$file_name = rownames(table3_data)
+table3_data$sample = gsub("_Table_3_library_information.txt", "", table3_data$file_name)
+
+rownames(table3_data) = NULL
+
+write.csv(table3_data, "table3_combined_data.csv", row.names = TRUE)
+
+```
+
+```{r merge and write to csv}
+sequencing_info_df = merge(file_info_df, table3_data, by = "sample", all = TRUE)
+write.csv(sequencing_info_df, paste0(rootdir, "/sequencing_info.csv"), row.names = FALSE)
+```
+
+```{r}
+results = data.frame(FileName = character(), Value = numeric(), stringsAsFactors = FALSE)
+directory = "/oak/stanford/groups/dekas/sequences/OAST/orca_basin2023/JGI_MGMT_2024/QC_and_Genome_Assembly/READMEs/txt" 
+
+directory
+
+file_list = list.files(directory, pattern = "*.txt", full.names = TRUE)
+
+for (file in file_list) {
+  file_content = readLines(file)
+  line = grep("Main genome contig N/L50", file_content, value = TRUE)
+  
+  if (length(line) > 0) {
+    value = str_extract(line, "(\\d+)(?=/)")
+    results = rbind(results, data.frame(FileName = basename(file), Value = as.numeric(value), stringsAsFactors = FALSE))
+  }
+}
+
+filtered_results = results[grepl("DNA", results$FileName), ]
+
+filtered_results$file_name = sub("\\[.*", "", filtered_results$FileName)
+filtered_results$file_name = sub("DNA_", "DNA", filtered_results$file_name)
+
+df = merge(filtered_results, assembly_stats_summary, by = "file_name", all.x = TRUE)
+
+ggplot(data = df) + geom_point(aes(x=ctg_N50, y=Value)) + ylim(0,784878) +xlim(0,33856)
+
+```
+
+```{r stats command}
+dir.create(paste0(rootdir, "QC_and_Genome_Assembly/assembly_stats/"))
+
+files = list.files(paste0(rootdir, "QC_and_Genome_Assembly/contigs/DNA"), pattern = "fasta$", full.names = TRUE)
+file_list = sub("\\..*$", "", files)
+
+sample_list = sub("/oak/stanford/groups/dekas/sequences/OAST/orca_basin2023/JGI_MGMT_2024/QC_and_Genome_Assembly/contigs/DNA/", "", file_list)
+
+sink(paste0(rootdir, "bbtool_stats.sh"))
+for (i in sample_list) {
+  cat("sbatch -J bbstats", i, " -c 20 --mem-per-cpu 8G -p serc -t 160:00:00 --wrap 'stats.sh in=", rootdir, "QC_and_Genome_Assembly/contigs/DNA/", i, ".contigs.fasta out=", rootdir, "QC_and_Genome_Assembly/assembly_stats/", i, ".stats.tsv format=3'", "\n", sep = "")
+}
+sink()
+file.show(paste0(rootdir, "bbtool_stats.sh"))
+```
+
+```{r stats parsing}
+directory_path = paste0(rootdir, "QC_and_Genome_Assembly/assembly_stats/")
+file_list = list.files(directory_path, pattern = "\\.tsv$", full.names = TRUE)
+
+read_tsv_file = function(file) {
+  df = read_tsv(file)
+  df$file_name = sub("\\.stats\\.tsv$", "", basename(file))  
+  df = df %>% select(file_name, everything())
+  return(df)
+}
+
+stats_df = bind_rows(lapply(file_list, read_tsv_file))
+
+write.csv(stats_df, paste0(rootdir, "assembly_stats_summary.csv"), row.names = FALSE)
+```
